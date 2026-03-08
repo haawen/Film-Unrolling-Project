@@ -1,0 +1,51 @@
+# ──────────────────────────────────────────────────────────────────
+# Data files — large HDF5, TIFF, and nnU-Net artifacts
+# ──────────────────────────────────────────────────────────────────
+
+# Raw scanned roll data
+scannedrolls/
+
+# nnU-Net data (raw, preprocessed, results)
+nnUNet_data/
+
+# HDF5 files anywhere
+*.h5
+*.hdf5
+
+# Image data
+*.tif
+*.tiff
+*.nii.gz
+*.nrrd
+*.mha
+
+# NumPy artifacts
+*.npy
+*.npz
+
+# ──────────────────────────────────────────────────────────────────
+# Python
+# ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# ──────────────────────────────────────────────────────────────────
+# IDE / OS
+# ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
