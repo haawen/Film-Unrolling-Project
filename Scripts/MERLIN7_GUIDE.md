@@ -6,23 +6,34 @@ Quick reference for running nnU-Net v2 training on the Merlin7 cluster at PSI.
 
 ## 1. Transfer Project to Merlin7
 
-From your local Windows machine, use `scp` (or WinSCP/rsync):
+### Initial Setup (Scripts & Config)
+
+From your local Windows machine, transfer the scripts and requirements:
 
 ```bash
-# Transfer scripts (small files — go to home directory)
-scp -r D:\M_thesis\Scripts  <username>@merlin7.psi.ch:~/M_thesis/Scripts
-scp    D:\M_thesis\requirements.txt <username>@merlin7.psi.ch:~/M_thesis/
-
-# Transfer the converted dataset (the nnU-Net format .tif files)
-scp -r D:\M_thesis\nnUNet_data\nnUNet_raw\Dataset501_MickeyScroll \
-       <username>@merlin7.psi.ch:~/M_thesis/nnUNet_data/nnUNet_raw/
-
-# If already preprocessed locally, also transfer preprocessed data (saves time):
-scp -r D:\M_thesis\nnUNet_data\nnUNet_preprocessed\Dataset501_MickeyScroll \
-       <username>@merlin7.psi.ch:~/M_thesis/nnUNet_data/nnUNet_preprocessed/
+# Transfer scripts and requirements
+scp -r C:\Users\li_k1\M_thesis\Scripts li_k1@login001.merlin7.psi.ch:~/M_thesis/
+scp C:\Users\li_k1\M_thesis\requirements.txt li_k1@login001.merlin7.psi.ch:~/M_thesis/
 ```
 
-> **Tip:** Data lives under `/data/user/<username>/` on Merlin7. `~` points there.
+> **Note:** The `~/M_thesis/` directory and subdirectories will be created automatically during the setup script (step 2).
+
+### Transfer Dataset (After Conversion)
+
+Once you have converted your HDF5 data to nnU-Net format (`.tif` files), transfer the dataset:
+
+```bash
+# Transfer the converted dataset (the nnU-Net format .tif files)
+scp -r C:\Users\li_k1\M_thesis\nnUNet_data\nnUNet_raw\Dataset501_MickeyScroll \
+       li_k1@login001.merlin7.psi.ch:~/M_thesis/nnUNet_data/nnUNet_raw/
+
+# Optional: If already preprocessed locally, also transfer preprocessed data (saves time):
+scp -r C:\Users\li_k1\M_thesis\nnUNet_data\nnUNet_preprocessed\Dataset501_MickeyScroll \
+       li_k1@login001.merlin7.psi.ch:~/M_thesis/nnUNet_data/nnUNet_preprocessed/
+```
+
+> **Tip:** Data lives under `/data/user/<username>/` on Merlin7. `~` points there.  
+> **Note:** You don't need the dataset to run the initial setup. Transfer it later once converted.
 
 ---
 
@@ -31,12 +42,20 @@ scp -r D:\M_thesis\nnUNet_data\nnUNet_preprocessed\Dataset501_MickeyScroll \
 SSH into Merlin7 and run the setup script once:
 
 ```bash
-ssh <username>@merlin7.psi.ch
+ssh li_k1@login001.merlin7.psi.ch
 cd ~/M_thesis
 bash Scripts/setup_merlin7.sh
 ```
 
-This creates the `nnunet` conda environment with Python 3.12, PyTorch (CUDA 12.4), and nnU-Net v2.
+This script automatically:
+- Creates the `nnunet` conda environment with Python 3.12
+- Installs PyTorch with CUDA 12.4 support
+- Installs nnU-Net v2 and dependencies (h5py, scikit-image, tifffile)
+- Creates the complete directory structure:
+  - `~/M_thesis/nnUNet_data/nnUNet_raw/` (for raw dataset)
+  - `~/M_thesis/nnUNet_data/nnUNet_preprocessed/` (for preprocessed data)
+  - `~/M_thesis/nnUNet_data/nnUNet_results/` (for training results)
+  - `~/M_thesis/logs/` (for job logs)
 
 ---
 
@@ -155,7 +174,7 @@ After training completes:
 ls ~/M_thesis/nnUNet_data/nnUNet_results/Dataset501_MickeyScroll/
 
 # Download results to local machine:
-scp -r <username>@merlin7.psi.ch:~/M_thesis/nnUNet_data/nnUNet_results \
+scp -r li_k1@login001.merlin7.psi.ch:~/M_thesis/nnUNet_data/nnUNet_results \
        D:\M_thesis\nnUNet_data\
 ```
 

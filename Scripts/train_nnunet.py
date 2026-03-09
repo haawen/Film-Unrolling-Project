@@ -147,13 +147,18 @@ def step_convert():
     # Set up nnU-Net environment variables (needed for paths module)
     _set_env_vars()
 
-    # Create directories
+    # Create directories (automatically created if they don't exist)
     dataset_dir = NNUNET_RAW / DATASET_NAME
     images_tr = dataset_dir / "imagesTr"
     labels_tr = dataset_dir / "labelsTr"
 
     images_tr.mkdir(parents=True, exist_ok=True)
     labels_tr.mkdir(parents=True, exist_ok=True)
+    
+    print(f"  Created directories (if needed):")
+    print(f"    {dataset_dir}")
+    print(f"    {images_tr}")
+    print(f"    {labels_tr}\n")
 
     # Find all raw HDF5 files (those WITHOUT "-image_Probabilities" in the name)
     raw_files = sorted([
@@ -329,7 +334,14 @@ def step_train(fold: int = None, continue_training: bool = False):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _set_env_vars():
-    """Set nnU-Net environment variables."""
+    """Set nnU-Net environment variables and ensure directories exist."""
+    # Create base directories if they don't exist
+    NNUNET_BASE.mkdir(parents=True, exist_ok=True)
+    NNUNET_RAW.mkdir(parents=True, exist_ok=True)
+    NNUNET_PREPROCESSED.mkdir(parents=True, exist_ok=True)
+    NNUNET_RESULTS.mkdir(parents=True, exist_ok=True)
+    
+    # Set environment variables
     os.environ["nnUNet_raw"] = str(NNUNET_RAW)
     os.environ["nnUNet_preprocessed"] = str(NNUNET_PREPROCESSED)
     os.environ["nnUNet_results"] = str(NNUNET_RESULTS)

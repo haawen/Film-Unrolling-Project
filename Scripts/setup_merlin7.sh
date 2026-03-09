@@ -24,20 +24,36 @@ echo "============================================================"
 echo ""
 echo "[1/5] Checking conda..."
 
-if ! command -v conda &> /dev/null; then
-    # Try to source conda from common locations
-    if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-        source "$HOME/miniconda3/etc/profile.d/conda.sh"
-    elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
-        source "$HOME/anaconda3/etc/profile.d/conda.sh"
-    else
-        echo "  ERROR: conda not found. Install Miniconda first:"
-        echo "    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh"
-        echo "    bash Miniconda3-latest-Linux-x86_64.sh -b -p \$HOME/miniconda3"
-        echo "    source \$HOME/miniconda3/etc/profile.d/conda.sh"
-        echo "    conda init bash"
-        exit 1
+# Source conda shell hooks (needed for non-interactive shells / scripts)
+CONDA_SH=""
+if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    CONDA_SH="$HOME/miniconda3/etc/profile.d/conda.sh"
+elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
+    CONDA_SH="$HOME/anaconda3/etc/profile.d/conda.sh"
+elif [ -f "/opt/psi/Programming/anaconda/2024.08/conda/etc/profile.d/conda.sh" ]; then
+    CONDA_SH="/opt/psi/Programming/anaconda/2024.08/conda/etc/profile.d/conda.sh"
+fi
+
+if [ -n "$CONDA_SH" ]; then
+    source "$CONDA_SH"
+elif ! command -v conda &> /dev/null; then
+    # Try module system as last resort
+    echo "  No local conda found. Loading system anaconda module..."
+    module load anaconda 2>/dev/null || true
+    # After module load, find and source conda.sh for activate support
+    CONDA_PREFIX_FOUND=$(conda info --base 2>/dev/null)
+    if [ -n "$CONDA_PREFIX_FOUND" ] && [ -f "${CONDA_PREFIX_FOUND}/etc/profile.d/conda.sh" ]; then
+        source "${CONDA_PREFIX_FOUND}/etc/profile.d/conda.sh"
     fi
+fi
+
+if ! command -v conda &> /dev/null; then
+    echo "  ERROR: conda not found. Please install Miniforge:"
+    echo "    wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
+    echo "    bash Miniforge3-Linux-x86_64.sh -b -p \$HOME/miniconda3"
+    echo "    source \$HOME/miniconda3/etc/profile.d/conda.sh"
+    echo "    conda init bash"
+    exit 1
 fi
 
 echo "  conda: $(conda --version)"
