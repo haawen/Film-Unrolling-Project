@@ -58,7 +58,7 @@ NNUNET_PREPROCESSED = Path(
 )
 RESULTS_BASE = Path(os.environ.get("MONAI_RESULTS", PROJECT_DIR / "monai_results"))
 
-DATASET_NAME = "Dataset501_MickeyScroll"
+DATASET_NAME_DEFAULT = "Dataset502_MickeyScroll3D"
 NUM_CLASSES = 3  # background=0, foreground_1=1, foreground_2=2
 
 # ─── Data helpers ────────────────────────────────────────────────────────────
@@ -79,9 +79,9 @@ def discover_cases(raw_dir: Path) -> list[dict]:
     return data
 
 
-def load_splits(fold: int, data_list: list[dict]) -> tuple[list[dict], list[dict]]:
+def load_splits(fold: int, data_list: list[dict], dataset_name: str) -> tuple[list[dict], list[dict]]:
     """Return (train, val) using nnU-Net splits if available, else KFold."""
-    splits_file = NNUNET_PREPROCESSED / DATASET_NAME / "splits_final.json"
+    splits_file = NNUNET_PREPROCESSED / dataset_name / "splits_final.json"
     if splits_file.exists():
         splits = json.loads(splits_file.read_text())
         if fold < len(splits):
@@ -156,10 +156,10 @@ def build_model(name: str, patch_size: tuple[int, ...]) -> torch.nn.Module:
         )
     elif name == "swinunetr":
         return SwinUNETR(
-            img_size=patch_size,
             in_channels=1,
             out_channels=NUM_CLASSES,
             feature_size=48,
+            spatial_dims=3,
             use_checkpoint=True,
         )
     else:
@@ -261,13 +261,14 @@ def train(args):
     print(f"Patch size: {patch_size}")
 
     # ── Data ─────────────────────────────────────────────────────────────
-    raw_dir = NNUNET_RAW / DATASET_NAME
+    dataset_name = args.dataset
+    raw_dir = NNUNET_RAW / dataset_name
     data_list = discover_cases(raw_dir)
     if not data_list:
         raise FileNotFoundError(f"No cases found in {raw_dir}")
-    print(f"Found {len(data_list)} cases")
+    print(f"Found {len(data_list)} cases in {dataset_name}")
 
-    train_data, val_data = load_splits(args.fold, data_list)
+    train_data, val_data = load_splits(args.fold, data_list, dataset_name)
     print(f"Fold {args.fold}: {len(train_data)} train, {len(val_data)} val")
 
     train_ds = CacheDataset(train_data, transform=train_transforms(patch_size), cache_rate=0.5)
@@ -292,7 +293,7 @@ def train(args):
 
     # ── Output directory ─────────────────────────────────────────────────
     model_display = "UNet3D" if args.model == "unet3d" else "SwinUNETR"
-    out_dir = RESULTS_BASE / DATASET_NAME / model_display / f"fold_{args.fold}"
+    out_dir = RESULTS_BASE / dataset_name / model_display / f"fold_{args.fold}"
     ckpt_dir = out_dir / "checkpoints"
     val_dir = out_dir / "validation"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -418,6 +419,8 @@ def train(args):
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="MONAI training: 3D U-Net / Swin UNETR")
     p.add_argument("--model", required=True, choices=["unet3d", "swinunetr"])
+    p.add_argument("--dataset", default=DATASET_NAME_DEFAULT,
+                   help=f"Dataset directory name (default: {DATASET_NAME_DEFAULT})")
     p.add_argument("--fold", type=int, default=0)
     p.add_argument("--epochs", type=int, default=250)
     p.add_argument("--batch_size", type=int, default=2)

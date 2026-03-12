@@ -34,7 +34,7 @@ mkdir -p logs
 # ─── Project paths ───────────────────────────────────────────────────────────
 PROJECT_DIR="$HOME/M_thesis"
 CONDA_ENV="nnunet"
-DATASET_NAME="Dataset501_MickeyScroll"
+DATASET_NAME="Dataset502_MickeyScroll3D"
 
 # Persistent data (on /data/user)
 HOME_RAW="${PROJECT_DIR}/nnUNet_data/nnUNet_raw"
@@ -143,6 +143,7 @@ echo "============================================================"
 
 CMD="srun python ${PROJECT_DIR}/Scripts/train_monai.py \
     --model swinunetr \
+    --dataset ${DATASET_NAME} \
     --fold ${FOLD} \
     --epochs 250 \
     --batch_size 1 \

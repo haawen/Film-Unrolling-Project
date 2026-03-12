@@ -44,7 +44,7 @@ mkdir -p logs
 # ─── Project paths ───────────────────────────────────────────────────────────
 PROJECT_DIR="$HOME/M_thesis"
 CONDA_ENV="nnunet"
-DATASET_NAME="Dataset501_MickeyScroll"
+DATASET_NAME="Dataset502_MickeyScroll3D"
 
 # Persistent data (on /data/user — for storage, not I/O during training)
 HOME_RAW="${PROJECT_DIR}/nnUNet_data/nnUNet_raw"
@@ -151,7 +151,7 @@ if [ -f "$TRAINER_SRC" ]; then
 fi
 
 # ─── Dataset configuration ──────────────────────────────────────────────────
-DATASET_ID=501
+DATASET_ID=502
 CONFIG="3d_fullres"
 TRAINER="nnUNetTrainerProgress"
 

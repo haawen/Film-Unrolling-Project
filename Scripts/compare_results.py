@@ -23,9 +23,15 @@ import matplotlib.pyplot as plt
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
 BASE = Path(__file__).resolve().parent.parent
-NNUNET_RESULTS_DIR = BASE / "nnUNet_data" / "nnUNet_results" / "Dataset501_MickeyScroll"
-MONAI_RESULTS_DIR = BASE / "monai_results" / "Dataset501_MickeyScroll"
+NNUNET_RESULTS_BASE = BASE / "nnUNet_data" / "nnUNet_results"
+MONAI_RESULTS_BASE = BASE / "monai_results"
 OUTPUT_DIR = BASE / "visualizations"
+
+# All dataset directories to scan
+DATASET_NAMES = [
+    "Dataset501_MickeyScroll",
+    "Dataset502_MickeyScroll3D",
+]
 
 LABEL_NAMES = {0: "background", 1: "foreground_1", 2: "foreground_2"}
 FG_LABELS = {k: v for k, v in LABEL_NAMES.items() if k != 0}
@@ -56,24 +62,27 @@ def discover_experiments() -> dict[str, dict]:
     Returns {display_name: {fold_name: summary_path}}."""
     experiments = {}
 
-    # 1) nnU-Net experiments  (trainer__plans__config directories)
-    if NNUNET_RESULTS_DIR.exists():
-        for exp_dir in sorted(NNUNET_RESULTS_DIR.iterdir()):
-            if not exp_dir.is_dir():
-                continue
-            folds = _scan_fold_dirs(exp_dir)
-            if folds:
-                name = NNUNET_SHORT.get(exp_dir.name, exp_dir.name)
-                experiments[name] = folds
+    for ds_name in DATASET_NAMES:
+        # 1) nnU-Net experiments  (trainer__plans__config directories)
+        nnunet_dir = NNUNET_RESULTS_BASE / ds_name
+        if nnunet_dir.exists():
+            for exp_dir in sorted(nnunet_dir.iterdir()):
+                if not exp_dir.is_dir():
+                    continue
+                folds = _scan_fold_dirs(exp_dir)
+                if folds:
+                    name = NNUNET_SHORT.get(exp_dir.name, exp_dir.name)
+                    experiments[name] = folds
 
-    # 2) MONAI experiments  (model-name directories)
-    if MONAI_RESULTS_DIR.exists():
-        for model_dir in sorted(MONAI_RESULTS_DIR.iterdir()):
-            if not model_dir.is_dir():
-                continue
-            folds = _scan_fold_dirs(model_dir)
-            if folds:
-                experiments[model_dir.name] = folds
+        # 2) MONAI experiments  (model-name directories)
+        monai_dir = MONAI_RESULTS_BASE / ds_name
+        if monai_dir.exists():
+            for model_dir in sorted(monai_dir.iterdir()):
+                if not model_dir.is_dir():
+                    continue
+                folds = _scan_fold_dirs(model_dir)
+                if folds:
+                    experiments[model_dir.name] = folds
 
     return experiments
 
@@ -381,8 +390,9 @@ if __name__ == "__main__":
     experiments = discover_experiments()
     if not experiments:
         print("No experiments found. Checked:")
-        print(f"  nnU-Net:  {NNUNET_RESULTS_DIR}")
-        print(f"  MONAI:    {MONAI_RESULTS_DIR}")
+        for ds in DATASET_NAMES:
+            print(f"  nnU-Net:  {NNUNET_RESULTS_BASE / ds}")
+            print(f"  MONAI:    {MONAI_RESULTS_BASE / ds}")
         print("Train at least one model first.")
         exit(1)
 

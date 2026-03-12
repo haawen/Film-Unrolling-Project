@@ -7,23 +7,26 @@
 # =============================================================================
 
 PROJECT_DIR="$HOME/M_thesis"
-DATASET="Dataset501_MickeyScroll"
+DATASET_2D="Dataset501_MickeyScroll"
+DATASET_3D="Dataset502_MickeyScroll3D"
 
 echo "Creating output directories for all models..."
 echo "Project: ${PROJECT_DIR}"
 echo ""
 
-# ─── nnU-Net results (managed by nnU-Net, but ensure base exists) ────────────
-mkdir -p "${PROJECT_DIR}/nnUNet_data/nnUNet_results/${DATASET}"
-echo "  [OK] nnUNet_data/nnUNet_results/${DATASET}/"
+# ─── nnU-Net results ─────────────────────────────────────────────────────────
+mkdir -p "${PROJECT_DIR}/nnUNet_data/nnUNet_results/${DATASET_2D}"
+echo "  [OK] nnUNet_data/nnUNet_results/${DATASET_2D}/"
+mkdir -p "${PROJECT_DIR}/nnUNet_data/nnUNet_results/${DATASET_3D}"
+echo "  [OK] nnUNet_data/nnUNet_results/${DATASET_3D}/"
 
 # ─── MONAI results ──────────────────────────────────────────────────────────
 for MODEL in UNet3D SwinUNETR; do
     for FOLD in 0 1 2 3 4; do
-        mkdir -p "${PROJECT_DIR}/monai_results/${DATASET}/${MODEL}/fold_${FOLD}/checkpoints"
-        mkdir -p "${PROJECT_DIR}/monai_results/${DATASET}/${MODEL}/fold_${FOLD}/validation"
+        mkdir -p "${PROJECT_DIR}/monai_results/${DATASET_3D}/${MODEL}/fold_${FOLD}/checkpoints"
+        mkdir -p "${PROJECT_DIR}/monai_results/${DATASET_3D}/${MODEL}/fold_${FOLD}/validation"
     done
-    echo "  [OK] monai_results/${DATASET}/${MODEL}/  (folds 0-4)"
+    echo "  [OK] monai_results/${DATASET_3D}/${MODEL}/  (folds 0-4)"
 done
 
 # ─── Logs directory ──────────────────────────────────────────────────────────
