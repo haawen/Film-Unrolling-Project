@@ -46,6 +46,7 @@ from monai.transforms import (
     RandRotate90d,
     RandScaleIntensityd,
     RandShiftIntensityd,
+    SpatialPadd,
 )
 from monai.utils import set_determinism
 
@@ -110,6 +111,7 @@ def train_transforms(patch_size: tuple[int, ...]):
             LoadImaged(keys=["image", "label"]),
             EnsureChannelFirstd(keys=["image", "label"]),
             NormalizeIntensityd(keys=["image"], nonzero=True),
+            SpatialPadd(keys=["image", "label"], spatial_size=patch_size),
             RandCropByPosNegLabeld(
                 keys=["image", "label"],
                 label_key="label",
@@ -129,12 +131,13 @@ def train_transforms(patch_size: tuple[int, ...]):
     )
 
 
-def val_transforms():
+def val_transforms(patch_size: tuple[int, ...]):
     return Compose(
         [
             LoadImaged(keys=["image", "label"]),
             EnsureChannelFirstd(keys=["image", "label"]),
             NormalizeIntensityd(keys=["image"], nonzero=True),
+            SpatialPadd(keys=["image", "label"], spatial_size=patch_size),
             EnsureTyped(keys=["image", "label"]),
         ]
     )
@@ -271,8 +274,8 @@ def train(args):
     train_data, val_data = load_splits(args.fold, data_list, dataset_name)
     print(f"Fold {args.fold}: {len(train_data)} train, {len(val_data)} val")
 
-    train_ds = CacheDataset(train_data, transform=train_transforms(patch_size), cache_rate=0.5)
-    val_ds = CacheDataset(val_data, transform=val_transforms(), cache_rate=1.0)
+    train_ds = CacheDataset(train_data, transform=train_transforms(patch_size), cache_rate=0.2, num_workers=4)
+    val_ds = CacheDataset(val_data, transform=val_transforms(patch_size), cache_rate=0.2, num_workers=2)
 
     train_loader = DataLoader(
         train_ds,
@@ -430,6 +433,6 @@ if __name__ == "__main__":
     p.add_argument("--val_interval", type=int, default=10,
                    help="Validate every N epochs")
     p.add_argument("--save_every", type=int, default=25)
-    p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--workers", type=int, default=4)
     p.add_argument("--resume", action="store_true")
     train(p.parse_args())

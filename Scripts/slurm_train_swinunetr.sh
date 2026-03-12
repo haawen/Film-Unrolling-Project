@@ -20,7 +20,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=72G
+#SBATCH --mem=128G
 #SBATCH --gres=gpu:1
 #SBATCH --hint=multithread
 
@@ -148,10 +148,10 @@ CMD="srun python ${PROJECT_DIR}/Scripts/train_monai.py \
     --epochs 250 \
     --batch_size 1 \
     --lr 1e-4 \
-    --patch_size 16 192 192 \
+    --patch_size 32 192 192 \
     --val_interval 10 \
     --save_every 25 \
-    --workers 8"
+    --workers 4"
 
 if [ "$RESUME_FLAG" = "--resume" ]; then
     CMD="${CMD} --resume"
