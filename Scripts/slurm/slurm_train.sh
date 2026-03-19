@@ -1,32 +1,37 @@
-#!/bin/bash
+ #!/bin/bash
 # =============================================================================
-# SLURM Job Script — 3D U-Net (MONAI) Training on Merlin7 (A100 GPU)
+# SLURM Job Script — nnU-Net v2 Training on Merlin7 (A100 GPU)
 # =============================================================================
 # Usage:
-#   sbatch Scripts/slurm_train_3dunet.sh              # Train fold 0
-#   sbatch Scripts/slurm_train_3dunet.sh 0             # Train fold 0
-#   sbatch Scripts/slurm_train_3dunet.sh 0 --resume    # Resume fold 0
+#   sbatch Scripts/slurm/slurm_train.sh              # Train all 5 folds
+#   sbatch Scripts/slurm/slurm_train.sh 0            # Train fold 0 only
+#   sbatch Scripts/slurm/slurm_train.sh 0 --c        # Continue training fold 0
 #
-# PREREQUISITE: 3D NIfTI data in nnUNet_raw/Dataset501_MickeyScroll/
 # Submit from your project root: /data/user/$USER/M_thesis
+#
+# Storage policy (Merlin7 Code of Conduct):
+#   - Preprocessed data is copied to /scratch at job start (fast local I/O)
+#   - Training results are written to /scratch during training
+#   - Results are copied back to /data/user at job end
+#   - /scratch is cleaned up on exit
 # =============================================================================
 
 #SBATCH --cluster=gmerlin7
 #SBATCH --partition=a100-daily
-#SBATCH --job-name=unet3d-mickey
-#SBATCH --output=logs/unet3d_%j.out
-#SBATCH --error=logs/unet3d_%j.err
+#SBATCH --job-name=nnunet-mickey
+#SBATCH --output=logs/nnunet_%j.out
+#SBATCH --error=logs/nnunet_%j.err
 #SBATCH --time=23:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --mem=60G
 #SBATCH --gres=gpu:1
 #SBATCH --hint=multithread
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
-FOLD=${1:-0}
-RESUME_FLAG=${2:-""}
+FOLD=${1:-"all"}
+CONTINUE_FLAG=${2:-""}
 
 # ─── Create log directory ────────────────────────────────────────────────────
 mkdir -p logs
@@ -34,29 +39,31 @@ mkdir -p logs
 # ─── Project paths ───────────────────────────────────────────────────────────
 PROJECT_DIR="$HOME/M_thesis"
 CONDA_ENV="nnunet"
-DATASET_NAME="Dataset502_MickeyScroll3D"
+DATASET_NAME="Dataset501_MickeyScroll"
 
-# Persistent data (on /data/user)
+# Persistent data (on /data/user — for storage, not I/O during training)
 HOME_RAW="${PROJECT_DIR}/nnUNet_data/nnUNet_raw"
 HOME_PREPROCESSED="${PROJECT_DIR}/nnUNet_data/nnUNet_preprocessed"
-HOME_RESULTS="${PROJECT_DIR}/monai_results"
+HOME_RESULTS="${PROJECT_DIR}/nnUNet_data/nnUNet_results"
 
-# Scratch workspace (fast local I/O)
-SCRATCH_DIR="/scratch/${USER}/unet3d_${SLURM_JOB_ID}"
+# Scratch workspace (fast local I/O during training — Merlin7 policy)
+SCRATCH_DIR="/scratch/${USER}/nnunet_${SLURM_JOB_ID}"
 SCRATCH_RAW="${SCRATCH_DIR}/nnUNet_raw"
 SCRATCH_PREPROCESSED="${SCRATCH_DIR}/nnUNet_preprocessed"
-SCRATCH_RESULTS="${SCRATCH_DIR}/monai_results"
+SCRATCH_RESULTS="${SCRATCH_DIR}/nnUNet_results"
 
-# ─── Cleanup function ───────────────────────────────────────────────────────
+# ─── Cleanup function (always runs, even on failure/cancellation) ────────────
 cleanup() {
     echo ""
     echo "─── Cleanup ───────────────────────────────────────────────"
+    # Copy results from scratch back to home before deleting
     if [ -d "${SCRATCH_RESULTS}/${DATASET_NAME}" ]; then
         echo "  Copying results from /scratch back to /data/user..."
         mkdir -p "${HOME_RESULTS}"
         rsync -a "${SCRATCH_RESULTS}/${DATASET_NAME}/" "${HOME_RESULTS}/${DATASET_NAME}/"
         echo "  Results saved to: ${HOME_RESULTS}/${DATASET_NAME}"
     fi
+    # Clean up scratch (mandatory per Merlin7 Code of Conduct)
     if [ -d "${SCRATCH_DIR}" ]; then
         echo "  Cleaning up /scratch..."
         rm -rf "${SCRATCH_DIR}"
@@ -70,34 +77,28 @@ trap cleanup EXIT
 echo "Setting up /scratch workspace..."
 mkdir -p "${SCRATCH_RAW}" "${SCRATCH_PREPROCESSED}" "${SCRATCH_RESULTS}"
 
+# Copy data to scratch for fast I/O
 if [ -d "${HOME_RAW}/${DATASET_NAME}" ]; then
     echo "  Copying raw dataset to /scratch..."
     rsync -a "${HOME_RAW}/${DATASET_NAME}/" "${SCRATCH_RAW}/${DATASET_NAME}/"
 fi
 
-SPLITS_SRC="${HOME_PREPROCESSED}/${DATASET_NAME}/splits_final.json"
-if [ -f "${SPLITS_SRC}" ]; then
-    echo "  Copying splits_final.json to /scratch..."
-    mkdir -p "${SCRATCH_PREPROCESSED}/${DATASET_NAME}"
-    cp "${SPLITS_SRC}" "${SCRATCH_PREPROCESSED}/${DATASET_NAME}/splits_final.json"
-    echo "  Splits file copied successfully."
-else
-    echo "  ERROR: splits_final.json not found at ${SPLITS_SRC}"
-    echo "  Run nnU-Net preprocessing first to generate consistent splits."
-    exit 1
+if [ -d "${HOME_PREPROCESSED}/${DATASET_NAME}" ]; then
+    echo "  Copying preprocessed data to /scratch..."
+    rsync -a "${HOME_PREPROCESSED}/${DATASET_NAME}/" "${SCRATCH_PREPROCESSED}/${DATASET_NAME}/"
 fi
 
-if [ -n "$RESUME_FLAG" ] && [ -d "${HOME_RESULTS}/${DATASET_NAME}/UNet3D" ]; then
-    echo "  Copying existing results to /scratch (for resume)..."
-    rsync -a "${HOME_RESULTS}/${DATASET_NAME}/UNet3D/" \
-        "${SCRATCH_RESULTS}/${DATASET_NAME}/UNet3D/"
+# If continuing training, copy existing results to scratch
+if [ -n "$CONTINUE_FLAG" ] && [ -d "${HOME_RESULTS}/${DATASET_NAME}" ]; then
+    echo "  Copying existing results to /scratch (for --c)..."
+    rsync -a "${HOME_RESULTS}/${DATASET_NAME}/" "${SCRATCH_RESULTS}/${DATASET_NAME}/"
 fi
 
-# Point environment at scratch
+# Point nnU-Net at scratch directories
 export nnUNet_raw="${SCRATCH_RAW}"
 export nnUNet_preprocessed="${SCRATCH_PREPROCESSED}"
-export MONAI_RESULTS="${SCRATCH_RESULTS}"
-export PROJECT_DIR="${PROJECT_DIR}"
+export nnUNet_results="${SCRATCH_RESULTS}"
+export nnUNet_n_proc_DA=12
 
 # ─── Activate conda environment ─────────────────────────────────────────────
 if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
@@ -113,12 +114,9 @@ fi
 
 conda activate "${CONDA_ENV}"
 
-# Ensure MONAI is installed
-python -c "import monai" 2>/dev/null || pip install --quiet "monai[einops,nibabel]"
-
-# ─── System info ─────────────────────────────────────────────────────────────
+# ─── Verify GPU is available ────────────────────────────────────────────────
 echo "============================================================"
-echo "  3D U-Net (MONAI) Training — Merlin7 A100"
+echo "  nnU-Net v2 Training — Merlin7 A100"
 echo "============================================================"
 echo "  Job ID:       ${SLURM_JOB_ID}"
 echo "  Node:         ${SLURM_NODELIST}"
@@ -126,46 +124,73 @@ echo "  GPUs:         ${SLURM_GPUS_ON_NODE:-1}"
 echo "  CPUs:         ${SLURM_CPUS_PER_TASK}"
 echo "  Partition:    ${SLURM_JOB_PARTITION}"
 echo "  Fold:         ${FOLD}"
-echo "  Resume:       ${RESUME_FLAG:-no}"
+echo "  Continue:     ${CONTINUE_FLAG:-no}"
 echo "  Scratch:      ${SCRATCH_DIR}"
 echo "  Started:      $(date)"
 echo "============================================================"
 
 python -c "
-import torch, monai
+import torch
 print(f'  PyTorch:  {torch.__version__}')
-print(f'  MONAI:    {monai.__version__}')
 print(f'  CUDA:     {torch.cuda.is_available()}')
 if torch.cuda.is_available():
     print(f'  GPU:      {torch.cuda.get_device_name(0)}')
     print(f'  VRAM:     {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')
 "
 
-# ─── Run training ───────────────────────────────────────────────────────────
-echo ""
-echo "Starting 3D U-Net training..."
-echo "============================================================"
+# ─── Install custom trainer into nnU-Net package ────────────────────────────
+TRAINER_SRC="${PROJECT_DIR}/Scripts/custom_trainer.py"
+NNUNET_PKG=$(python -c "import nnunetv2; print(nnunetv2.__path__[0])")
+TRAINER_DST="${NNUNET_PKG}/training/nnUNetTrainer/variants/custom_trainer.py"
 
-CMD="srun python ${PROJECT_DIR}/Scripts/train_monai.py \
-    --model unet3d \
-    --dataset ${DATASET_NAME} \
-    --fold ${FOLD} \
-    --epochs 250 \
-    --batch_size 2 \
-    --lr 1e-4 \
-    --patch_size 16 256 256 \
-    --val_interval 10 \
-    --save_every 25 \
-    --workers 8"
-
-if [ "$RESUME_FLAG" = "--resume" ]; then
-    CMD="${CMD} --resume"
+if [ -f "$TRAINER_SRC" ]; then
+    cp "$TRAINER_SRC" "$TRAINER_DST"
+    echo "  Custom trainer installed: ${TRAINER_DST}"
 fi
 
-eval $CMD
+# ─── Dataset configuration ──────────────────────────────────────────────────
+DATASET_ID=501
+CONFIG="2d"
+TRAINER="nnUNetTrainerProgress"
+
+# ─── Run training ───────────────────────────────────────────────────────────
+echo ""
+echo "Starting training..."
+echo "============================================================"
+
+if [ "$FOLD" = "all" ]; then
+    for f in 0 1 2 3 4; do
+        echo ""
+        echo ">>> Training fold ${f}/4 ..."
+        CMD="python -c \"from nnunetv2.run.run_training import run_training_entry; run_training_entry()\" \
+            ${DATASET_ID} ${CONFIG} ${f} -tr ${TRAINER} --npz"
+
+        if [ -n "$CONTINUE_FLAG" ]; then
+            CMD="${CMD} --c"
+        fi
+
+        eval srun $CMD
+
+        # Copy intermediate results back after each fold
+        echo "  Syncing fold ${f} results to /data/user..."
+        mkdir -p "${HOME_RESULTS}"
+        rsync -a "${SCRATCH_RESULTS}/${DATASET_NAME}/" "${HOME_RESULTS}/${DATASET_NAME}/"
+
+        echo ">>> Fold ${f} finished at $(date)"
+    done
+else
+    CMD="python -c \"from nnunetv2.run.run_training import run_training_entry; run_training_entry()\" \
+        ${DATASET_ID} ${CONFIG} ${FOLD} -tr ${TRAINER} --npz"
+
+    if [ -n "$CONTINUE_FLAG" ]; then
+        CMD="${CMD} --c"
+    fi
+
+    eval srun $CMD
+fi
 
 echo ""
 echo "============================================================"
-echo "  3D U-Net training complete at $(date)"
-echo "  Results will be copied to: ${HOME_RESULTS}/${DATASET_NAME}/UNet3D"
+echo "  Training complete at $(date)"
+echo "  Results will be copied to: ${HOME_RESULTS}"
 echo "============================================================"

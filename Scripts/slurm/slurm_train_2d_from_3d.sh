@@ -3,8 +3,8 @@
 # SLURM Job — Create Dataset503 (2D slices from 3D), preprocess, and train
 # =============================================================================
 # Usage:
-#   sbatch Scripts/slurm_train_2d_from_3d.sh              # Train fold 0
-#   sbatch Scripts/slurm_train_2d_from_3d.sh 0 --c        # Continue fold 0
+#   sbatch Scripts/slurm/slurm_train_2d_from_3d.sh              # Train fold 0
+#   sbatch Scripts/slurm/slurm_train_2d_from_3d.sh 0 --c        # Continue fold 0
 # =============================================================================
 
 #SBATCH --cluster=gmerlin7

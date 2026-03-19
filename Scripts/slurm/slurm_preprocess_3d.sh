@@ -2,7 +2,7 @@
 # =============================================================================
 # SLURM Job — nnU-Net preprocessing for Dataset502 (3D)
 # =============================================================================
-# Usage:  sbatch Scripts/slurm_preprocess_3d.sh
+# Usage:  sbatch Scripts/slurm/slurm_preprocess_3d.sh
 # =============================================================================
 
 #SBATCH --cluster=gmerlin7

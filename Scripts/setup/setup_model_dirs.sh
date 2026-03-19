@@ -3,7 +3,7 @@
 # Create output directories for all models on Merlin7 HPC
 # =============================================================================
 # Run once from your project root on the cluster:
-#   bash Scripts/setup_model_dirs.sh
+#   bash Scripts/setup/setup_model_dirs.sh
 # =============================================================================
 
 PROJECT_DIR="$HOME/M_thesis"
@@ -41,7 +41,7 @@ echo ""
 echo "All directories created."
 echo ""
 echo "Model overview:"
-echo "  1. nnU-Net 2D  → sbatch Scripts/slurm_train.sh [fold]"
-echo "  2. nnU-Net 3D  → sbatch Scripts/slurm_train_3d.sh [fold]"
-echo "  3. 3D U-Net    → sbatch Scripts/slurm_train_3dunet.sh [fold]"
-echo "  4. Swin UNETR  → sbatch Scripts/slurm_train_swinunetr.sh [fold]"
+echo "  1. nnU-Net 2D  → sbatch Scripts/slurm/slurm_train.sh [fold]"
+echo "  2. nnU-Net 3D  → sbatch Scripts/slurm/slurm_train_3d.sh [fold]"
+echo "  3. 3D U-Net    → sbatch Scripts/slurm/slurm_train_3dunet.sh [fold]"
+echo "  4. Swin UNETR  → sbatch Scripts/slurm/slurm_train_swinunetr.sh [fold]"

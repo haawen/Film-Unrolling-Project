@@ -3,9 +3,9 @@
 # SLURM Job Script — Swin UNETR (MONAI) Training on Merlin7 (A100 GPU)
 # =============================================================================
 # Usage:
-#   sbatch Scripts/slurm_train_swinunetr.sh              # Train fold 0
-#   sbatch Scripts/slurm_train_swinunetr.sh 0             # Train fold 0
-#   sbatch Scripts/slurm_train_swinunetr.sh 0 --resume    # Resume fold 0
+#   sbatch Scripts/slurm/slurm_train_swinunetr.sh              # Train fold 0
+#   sbatch Scripts/slurm/slurm_train_swinunetr.sh 0             # Train fold 0
+#   sbatch Scripts/slurm/slurm_train_swinunetr.sh 0 --resume    # Resume fold 0
 #
 # PREREQUISITE: 3D NIfTI data in nnUNet_raw/Dataset501_MickeyScroll/
 # Submit from your project root: /data/user/$USER/M_thesis

@@ -9,7 +9,7 @@
 #   - (Optional) nnU-Net 2D (Dataset501) for original 2D comparison
 #
 # Usage:
-#   sbatch Scripts/slurm_fair_compare.sh
+#   sbatch Scripts/slurm/slurm_fair_compare.sh
 # =============================================================================
 
 #SBATCH --cluster=gmerlin7

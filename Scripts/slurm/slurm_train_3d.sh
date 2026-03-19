@@ -1,11 +1,16 @@
 #!/bin/bash
 # =============================================================================
-# SLURM Job Script — nnU-Net v2 Training on Merlin7 (A100 GPU)
+# SLURM Job Script — nnU-Net v2  3D Training on Merlin7 (A100 GPU)
 # =============================================================================
 # Usage:
-#   sbatch Scripts/slurm_train.sh              # Train all 5 folds
-#   sbatch Scripts/slurm_train.sh 0            # Train fold 0 only
-#   sbatch Scripts/slurm_train.sh 0 --c        # Continue training fold 0
+#   sbatch Scripts/slurm/slurm_train_3d.sh              # Train all 5 folds
+#   sbatch Scripts/slurm/slurm_train_3d.sh 0            # Train fold 0 only
+#   sbatch Scripts/slurm/slurm_train_3d.sh 0 --c        # Continue training fold 0
+#
+# PREREQUISITE: Your dataset must contain 3D volumes (z > 1 per case).
+#   If your data is single 2D slices, you must first restructure it into
+#   stacked 3D volumes, then re-run preprocessing:
+#     nnUNetv2_plan_and_preprocess -d 501 --verify_dataset_integrity -c 3d_fullres --clean
 #
 # Submit from your project root: /data/user/$USER/M_thesis
 #
@@ -18,14 +23,14 @@
 
 #SBATCH --cluster=gmerlin7
 #SBATCH --partition=a100-daily
-#SBATCH --job-name=nnunet-mickey
-#SBATCH --output=logs/nnunet_%j.out
-#SBATCH --error=logs/nnunet_%j.err
+#SBATCH --job-name=nnunet3d-mickey
+#SBATCH --output=logs/nnunet3d_%j.out
+#SBATCH --error=logs/nnunet3d_%j.err
 #SBATCH --time=23:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=60G
+#SBATCH --mem=72G
 #SBATCH --gres=gpu:1
 #SBATCH --hint=multithread
 
@@ -39,7 +44,7 @@ mkdir -p logs
 # ─── Project paths ───────────────────────────────────────────────────────────
 PROJECT_DIR="$HOME/M_thesis"
 CONDA_ENV="nnunet"
-DATASET_NAME="Dataset501_MickeyScroll"
+DATASET_NAME="Dataset502_MickeyScroll3D"
 
 # Persistent data (on /data/user — for storage, not I/O during training)
 HOME_RAW="${PROJECT_DIR}/nnUNet_data/nnUNet_raw"
@@ -47,7 +52,7 @@ HOME_PREPROCESSED="${PROJECT_DIR}/nnUNet_data/nnUNet_preprocessed"
 HOME_RESULTS="${PROJECT_DIR}/nnUNet_data/nnUNet_results"
 
 # Scratch workspace (fast local I/O during training — Merlin7 policy)
-SCRATCH_DIR="/scratch/${USER}/nnunet_${SLURM_JOB_ID}"
+SCRATCH_DIR="/scratch/${USER}/nnunet3d_${SLURM_JOB_ID}"
 SCRATCH_RAW="${SCRATCH_DIR}/nnUNet_raw"
 SCRATCH_PREPROCESSED="${SCRATCH_DIR}/nnUNet_preprocessed"
 SCRATCH_RESULTS="${SCRATCH_DIR}/nnUNet_results"
@@ -56,14 +61,12 @@ SCRATCH_RESULTS="${SCRATCH_DIR}/nnUNet_results"
 cleanup() {
     echo ""
     echo "─── Cleanup ───────────────────────────────────────────────"
-    # Copy results from scratch back to home before deleting
     if [ -d "${SCRATCH_RESULTS}/${DATASET_NAME}" ]; then
         echo "  Copying results from /scratch back to /data/user..."
         mkdir -p "${HOME_RESULTS}"
         rsync -a "${SCRATCH_RESULTS}/${DATASET_NAME}/" "${HOME_RESULTS}/${DATASET_NAME}/"
         echo "  Results saved to: ${HOME_RESULTS}/${DATASET_NAME}"
     fi
-    # Clean up scratch (mandatory per Merlin7 Code of Conduct)
     if [ -d "${SCRATCH_DIR}" ]; then
         echo "  Cleaning up /scratch..."
         rm -rf "${SCRATCH_DIR}"
@@ -77,7 +80,6 @@ trap cleanup EXIT
 echo "Setting up /scratch workspace..."
 mkdir -p "${SCRATCH_RAW}" "${SCRATCH_PREPROCESSED}" "${SCRATCH_RESULTS}"
 
-# Copy data to scratch for fast I/O
 if [ -d "${HOME_RAW}/${DATASET_NAME}" ]; then
     echo "  Copying raw dataset to /scratch..."
     rsync -a "${HOME_RAW}/${DATASET_NAME}/" "${SCRATCH_RAW}/${DATASET_NAME}/"
@@ -88,7 +90,6 @@ if [ -d "${HOME_PREPROCESSED}/${DATASET_NAME}" ]; then
     rsync -a "${HOME_PREPROCESSED}/${DATASET_NAME}/" "${SCRATCH_PREPROCESSED}/${DATASET_NAME}/"
 fi
 
-# If continuing training, copy existing results to scratch
 if [ -n "$CONTINUE_FLAG" ] && [ -d "${HOME_RESULTS}/${DATASET_NAME}" ]; then
     echo "  Copying existing results to /scratch (for --c)..."
     rsync -a "${HOME_RESULTS}/${DATASET_NAME}/" "${SCRATCH_RESULTS}/${DATASET_NAME}/"
@@ -116,13 +117,14 @@ conda activate "${CONDA_ENV}"
 
 # ─── Verify GPU is available ────────────────────────────────────────────────
 echo "============================================================"
-echo "  nnU-Net v2 Training — Merlin7 A100"
+echo "  nnU-Net v2 Training (3D) — Merlin7 A100"
 echo "============================================================"
 echo "  Job ID:       ${SLURM_JOB_ID}"
 echo "  Node:         ${SLURM_NODELIST}"
 echo "  GPUs:         ${SLURM_GPUS_ON_NODE:-1}"
 echo "  CPUs:         ${SLURM_CPUS_PER_TASK}"
 echo "  Partition:    ${SLURM_JOB_PARTITION}"
+echo "  Config:       3d_fullres"
 echo "  Fold:         ${FOLD}"
 echo "  Continue:     ${CONTINUE_FLAG:-no}"
 echo "  Scratch:      ${SCRATCH_DIR}"
@@ -149,19 +151,19 @@ if [ -f "$TRAINER_SRC" ]; then
 fi
 
 # ─── Dataset configuration ──────────────────────────────────────────────────
-DATASET_ID=501
-CONFIG="2d"
+DATASET_ID=502
+CONFIG="3d_fullres"
 TRAINER="nnUNetTrainerProgress"
 
 # ─── Run training ───────────────────────────────────────────────────────────
 echo ""
-echo "Starting training..."
+echo "Starting 3D training..."
 echo "============================================================"
 
 if [ "$FOLD" = "all" ]; then
     for f in 0 1 2 3 4; do
         echo ""
-        echo ">>> Training fold ${f}/4 ..."
+        echo ">>> Training fold ${f}/4 (3d_fullres) ..."
         CMD="python -c \"from nnunetv2.run.run_training import run_training_entry; run_training_entry()\" \
             ${DATASET_ID} ${CONFIG} ${f} -tr ${TRAINER} --npz"
 
@@ -191,6 +193,6 @@ fi
 
 echo ""
 echo "============================================================"
-echo "  Training complete at $(date)"
+echo "  3D Training complete at $(date)"
 echo "  Results will be copied to: ${HOME_RESULTS}"
 echo "============================================================"

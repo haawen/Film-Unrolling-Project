@@ -4,17 +4,16 @@
 
 # Raw scanned roll data
 scannedrolls/
+01_Mickey_3d/
+01_Mickey_hdf_subset/
 
 # nnU-Net data (raw, preprocessed, results)
 nnUNet_data/
 
-monai_results/  # MONAI results (large model checkpoints and outputs)
-
-fair_comparison/  # Fair comparison outputs (predictions, reassembled volumes, results)
-
-visualizations/  # Large visualization outputs
-
-
+monai_results/
+fair_comparison/
+visualizations/
+logs/
 
 # HDF5 files anywhere
 *.h5

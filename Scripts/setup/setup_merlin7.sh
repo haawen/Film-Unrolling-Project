@@ -8,7 +8,7 @@
 # Usage:
 #   ssh merlin7
 #   cd ~/M_thesis
-#   bash Scripts/setup_merlin7.sh
+#   bash Scripts/setup/setup_merlin7.sh
 # =============================================================================
 
 set -e  # Exit on any error
@@ -140,6 +140,6 @@ echo "       export nnUNet_results=~/M_thesis/nnUNet_data/nnUNet_results"
 echo "       python -c \"from nnunetv2.experiment_planning.plan_and_preprocess_entrypoints import plan_and_preprocess_entry; plan_and_preprocess_entry()\" -d 501 --verify_dataset_integrity -c 2d --clean"
 echo ""
 echo "    3. Submit training job:"
-echo "       sbatch Scripts/slurm_train.sh 0     # single fold"
-echo "       sbatch Scripts/slurm_train.sh        # all 5 folds"
+echo "       sbatch Scripts/slurm/slurm_train.sh 0     # single fold"
+echo "       sbatch Scripts/slurm/slurm_train.sh        # all 5 folds"
 echo ""

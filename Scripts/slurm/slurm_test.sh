@@ -11,7 +11,7 @@
 #
 # Usage:
 #   cd ~/M_thesis
-#   sbatch Scripts/slurm_test.sh
+#   sbatch Scripts/slurm/slurm_test.sh
 # =============================================================================
 
 #SBATCH --cluster=gmerlin7
@@ -158,7 +158,7 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo "  SMOKE TEST PASSED!"
     echo "  Training loop completed 2 epochs without errors."
     echo "  You can now safely run the full training:"
-    echo "    sbatch Scripts/slurm_train.sh 0"
+    echo "    sbatch Scripts/slurm/slurm_train.sh 0"
 else
     echo "  SMOKE TEST FAILED (exit code: $EXIT_CODE)"
     echo "  Check logs/nnunet_test_${SLURM_JOB_ID}.err for details."
