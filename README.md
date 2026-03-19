@@ -34,9 +34,9 @@ All models evaluated on the same 5 hold-out 3D volumes (fold 0, ~3063 x 3062 x 2
 | SwinUNETR | 0.9350 | 0.8788 | 0.9243 | 0.9459 |
 | nnU-Net 2D (orig) | 0.7485 | 0.6280 | 0.9234 | 0.6809 |
 
-![Overlay comparison](docs/images/fair_comparison.png)
+![Score comparison](docs/images/fair_comparison.png)
 
-![Overlay comparison](docs/images/fair_comparison.png)
+![Overlay comparison](docs/images/fair_overlay_comparison.png)
 
 ### nnU-Net 3D — Ground Truth vs Prediction
 
