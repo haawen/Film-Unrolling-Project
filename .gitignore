@@ -8,6 +8,14 @@ scannedrolls/
 # nnU-Net data (raw, preprocessed, results)
 nnUNet_data/
 
+monai_results/  # MONAI results (large model checkpoints and outputs)
+
+fair_comparison/  # Fair comparison outputs (predictions, reassembled volumes, results)
+
+visualizations/  # Large visualization outputs
+
+
+
 # HDF5 files anywhere
 *.h5
 *.hdf5
@@ -44,6 +52,7 @@ env/
 # IDE / OS
 # ──────────────────────────────────────────────────────────────────
 .vscode/
+.claude/
 .idea/
 *.swp
 Thumbs.db
