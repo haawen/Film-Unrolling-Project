@@ -75,10 +75,16 @@ if [ -d "${HOME_RAW}/${DATASET_NAME}" ]; then
     rsync -a "${HOME_RAW}/${DATASET_NAME}/" "${SCRATCH_RAW}/${DATASET_NAME}/"
 fi
 
-if [ -d "${HOME_PREPROCESSED}/${DATASET_NAME}" ]; then
-    echo "  Copying preprocessed data (splits) to /scratch..."
-    rsync -a "${HOME_PREPROCESSED}/${DATASET_NAME}/splits_final.json" \
-        "${SCRATCH_PREPROCESSED}/${DATASET_NAME}/" 2>/dev/null || true
+SPLITS_SRC="${HOME_PREPROCESSED}/${DATASET_NAME}/splits_final.json"
+if [ -f "${SPLITS_SRC}" ]; then
+    echo "  Copying splits_final.json to /scratch..."
+    mkdir -p "${SCRATCH_PREPROCESSED}/${DATASET_NAME}"
+    cp "${SPLITS_SRC}" "${SCRATCH_PREPROCESSED}/${DATASET_NAME}/splits_final.json"
+    echo "  Splits file copied successfully."
+else
+    echo "  ERROR: splits_final.json not found at ${SPLITS_SRC}"
+    echo "  Run nnU-Net preprocessing first to generate consistent splits."
+    exit 1
 fi
 
 if [ -n "$RESUME_FLAG" ] && [ -d "${HOME_RESULTS}/${DATASET_NAME}/UNet3D" ]; then
@@ -147,7 +153,7 @@ CMD="srun python ${PROJECT_DIR}/Scripts/train_monai.py \
     --epochs 250 \
     --batch_size 2 \
     --lr 1e-4 \
-    --patch_size 16 192 192 \
+    --patch_size 16 256 256 \
     --val_interval 10 \
     --save_every 25 \
     --workers 8"

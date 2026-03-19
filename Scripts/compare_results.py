@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
 BASE = Path(__file__).resolve().parent.parent
@@ -324,7 +325,7 @@ def plot_per_case(experiments: dict[str, dict], save: bool = False):
         labels = [FG_LABELS[cls] for cls in sorted(FG_LABELS.keys())]
 
         if any(len(d) > 0 for d in data):
-            bp = axes[i].boxplot(data, labels=labels, patch_artist=True,
+            bp = axes[i].boxplot(data, tick_labels=labels, patch_artist=True,
                                 medianprops=dict(color="black"))
             for patch, color in zip(bp["boxes"], PALETTE):
                 patch.set_facecolor(color)
@@ -380,6 +381,193 @@ def _save_or_show(fig, filename: str, save: bool):
         plt.show()
 
 
+# ─── Prediction overlay visualizations ──────────────────────────────────────
+
+# Class overlay colors: class 1 = cyan, class 2 = orange-red
+OVERLAY_COLORS = {
+    1: np.array([0, 200, 255], dtype=np.uint8),   # cyan
+    2: np.array([255, 80, 0], dtype=np.uint8),     # orange-red
+}
+OVERLAY_ALPHA = 0.45
+
+
+def _normalize_to_uint8(img: np.ndarray) -> np.ndarray:
+    """Normalize a grayscale image to 0-255 uint8 using robust percentile scaling."""
+    p2, p98 = np.percentile(img, [2, 98])
+    if p98 - p2 < 1e-6:
+        p2, p98 = float(img.min()), float(img.max())
+    if p98 - p2 < 1e-6:
+        return np.zeros_like(img, dtype=np.uint8)
+    clipped = np.clip((img.astype(np.float32) - p2) / (p98 - p2), 0, 1)
+    return (clipped * 255).astype(np.uint8)
+
+
+def _make_overlay(gray: np.ndarray, seg: np.ndarray, alpha: float = OVERLAY_ALPHA) -> np.ndarray:
+    """Blend a grayscale image with a colored segmentation mask.
+
+    Returns an (H, W, 3) uint8 RGB image.
+    """
+    gray_u8 = _normalize_to_uint8(gray)
+    rgb = np.stack([gray_u8, gray_u8, gray_u8], axis=-1).astype(np.float32)
+
+    for cls, color in OVERLAY_COLORS.items():
+        mask = seg == cls
+        if mask.any():
+            rgb[mask] = rgb[mask] * (1 - alpha) + color.astype(np.float32) * alpha
+
+    return np.clip(rgb, 0, 255).astype(np.uint8)
+
+
+def _discover_prediction_cases() -> list[dict]:
+    """Find all models that have saved validation predictions.
+
+    Returns a list of dicts with keys:
+        model_name, case_id, image_path, label_path, pred_path, is_3d
+    """
+    cases = []
+
+    # nnU-Net 2D
+    ds2d = NNUNET_RESULTS_BASE / "Dataset501_MickeyScroll"
+    raw2d = BASE / "nnUNet_data" / "nnUNet_raw" / "Dataset501_MickeyScroll"
+    for exp_dir in sorted(ds2d.glob("*")):
+        if not exp_dir.is_dir():
+            continue
+        name = NNUNET_SHORT.get(exp_dir.name, exp_dir.name)
+        for fold_dir in sorted(exp_dir.glob("fold_*")):
+            val_dir = fold_dir / "validation"
+            for pred in sorted(val_dir.glob("*.tif")):
+                case_id = pred.stem
+                img = raw2d / "imagesTr" / f"{case_id}_0000.tif"
+                lbl = raw2d / "labelsTr" / f"{case_id}.tif"
+                if img.exists() and lbl.exists():
+                    cases.append(dict(
+                        model_name=name, case_id=case_id,
+                        image_path=img, label_path=lbl, pred_path=pred,
+                        is_3d=False, fold=fold_dir.name,
+                    ))
+
+    # nnU-Net 3D
+    ds3d = NNUNET_RESULTS_BASE / "Dataset502_MickeyScroll3D"
+    raw3d = BASE / "nnUNet_data" / "nnUNet_raw" / "Dataset502_MickeyScroll3D"
+    for exp_dir in sorted(ds3d.glob("*")):
+        if not exp_dir.is_dir():
+            continue
+        name = NNUNET_SHORT.get(exp_dir.name, exp_dir.name)
+        for fold_dir in sorted(exp_dir.glob("fold_*")):
+            val_dir = fold_dir / "validation"
+            for pred in sorted(val_dir.glob("*.nii.gz")):
+                case_id = pred.name.replace(".nii.gz", "")
+                img = raw3d / "imagesTr" / f"{case_id}_0000.nii.gz"
+                lbl = raw3d / "labelsTr" / f"{case_id}.nii.gz"
+                if img.exists() and lbl.exists():
+                    cases.append(dict(
+                        model_name=name, case_id=case_id,
+                        image_path=img, label_path=lbl, pred_path=pred,
+                        is_3d=True, fold=fold_dir.name,
+                    ))
+
+    # MONAI models (UNet3D, SwinUNETR) — predictions saved as .nii.gz
+    monai3d = MONAI_RESULTS_BASE / "Dataset502_MickeyScroll3D"
+    if monai3d.exists():
+        for model_dir in sorted(monai3d.iterdir()):
+            if not model_dir.is_dir():
+                continue
+            for fold_dir in sorted(model_dir.glob("fold_*")):
+                val_dir = fold_dir / "validation"
+                for pred in sorted(val_dir.glob("*.nii.gz")):
+                    case_id = pred.name.replace(".nii.gz", "")
+                    img = raw3d / "imagesTr" / f"{case_id}_0000.nii.gz"
+                    lbl = raw3d / "labelsTr" / f"{case_id}.nii.gz"
+                    if img.exists() and lbl.exists():
+                        cases.append(dict(
+                            model_name=model_dir.name, case_id=case_id,
+                            image_path=img, label_path=lbl, pred_path=pred,
+                            is_3d=True, fold=fold_dir.name,
+                        ))
+
+    return cases
+
+
+def _load_slice(path: Path, is_3d: bool, z_idx: int | None = None) -> np.ndarray:
+    """Load a 2D array: either a .tif directly or the middle Z-slice of a .nii.gz."""
+    if is_3d:
+        import nibabel as nib
+        vol = nib.load(str(path)).get_fdata()
+        if z_idx is None:
+            z_idx = vol.shape[0] // 2  # middle slice along Z (depth) axis
+        return vol[z_idx, :, :]
+    else:
+        import tifffile
+        return tifffile.imread(str(path))
+
+
+def plot_prediction_overlays(save: bool = False, max_cases_per_model: int = 3):
+    """Generate overlay images: raw | GT overlay | prediction overlay for each model."""
+    all_cases = _discover_prediction_cases()
+    if not all_cases:
+        print("No prediction files found for overlay visualization.")
+        return
+
+    # Group by model
+    by_model: dict[str, list[dict]] = {}
+    for c in all_cases:
+        by_model.setdefault(c["model_name"], []).append(c)
+
+    print(f"\nGenerating prediction overlays for {len(by_model)} model(s)...")
+
+    for model_name, model_cases in by_model.items():
+        # Pick representative cases (evenly spaced)
+        step = max(1, len(model_cases) // max_cases_per_model)
+        selected = model_cases[::step][:max_cases_per_model]
+
+        n_cases = len(selected)
+        fig, axes = plt.subplots(n_cases, 3, figsize=(18, 6 * n_cases), squeeze=False)
+
+        for row, case in enumerate(selected):
+            is_3d = case["is_3d"]
+            img = _load_slice(case["image_path"], is_3d)
+            lbl = _load_slice(case["label_path"], is_3d)
+            pred = _load_slice(case["pred_path"], is_3d)
+
+            # Ensure label is integer
+            lbl = np.round(lbl).astype(int)
+            pred = np.round(pred).astype(int)
+
+            overlay_gt = _make_overlay(img, lbl)
+            overlay_pred = _make_overlay(img, pred)
+
+            # Raw image
+            axes[row, 0].imshow(_normalize_to_uint8(img), cmap="gray")
+            axes[row, 0].set_title(f"Raw — {case['case_id']}", fontsize=10)
+
+            # GT overlay
+            axes[row, 1].imshow(overlay_gt)
+            axes[row, 1].set_title("Ground Truth", fontsize=10)
+
+            # Prediction overlay
+            axes[row, 2].imshow(overlay_pred)
+            axes[row, 2].set_title("Prediction", fontsize=10)
+
+            for ax in axes[row]:
+                ax.axis("off")
+
+        # Legend
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor=np.array(OVERLAY_COLORS[1]) / 255, label="foreground_1"),
+            Patch(facecolor=np.array(OVERLAY_COLORS[2]) / 255, label="foreground_2"),
+        ]
+        fig.legend(handles=legend_elements, loc="lower center", ncol=2,
+                   fontsize=11, frameon=True, bbox_to_anchor=(0.5, -0.01))
+
+        suffix = "(mid Z-slice)" if selected[0]["is_3d"] else ""
+        fig.suptitle(f"{model_name} — Prediction Overlays {suffix}",
+                     fontsize=14, fontweight="bold")
+        plt.tight_layout()
+        safe_name = model_name.replace(" ", "_").replace("-", "_")
+        _save_or_show(fig, f"overlay_{safe_name}.png", save)
+
+
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -405,3 +593,4 @@ if __name__ == "__main__":
     plot_comparison(experiments, save=args.save)
     plot_per_case(experiments, save=args.save)
     plot_training_curves(experiments, save=args.save)
+    plot_prediction_overlays(save=args.save)

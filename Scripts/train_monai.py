@@ -27,6 +27,7 @@ from torch.cuda.amp import GradScaler, autocast
 from monai.data import (
     CacheDataset,
     DataLoader,
+    Dataset,
     decollate_batch,
     list_data_collate,
 )
@@ -105,13 +106,23 @@ def load_splits(fold: int, data_list: list[dict], dataset_name: str) -> tuple[li
 # ─── Transforms ──────────────────────────────────────────────────────────────
 
 
-def train_transforms(patch_size: tuple[int, ...]):
+def train_transforms_deterministic(patch_size: tuple[int, ...]):
+    """Deterministic transforms — safe to cache with CacheDataset."""
     return Compose(
         [
             LoadImaged(keys=["image", "label"]),
             EnsureChannelFirstd(keys=["image", "label"]),
             NormalizeIntensityd(keys=["image"], nonzero=True),
-            SpatialPadd(keys=["image", "label"], spatial_size=patch_size),
+            SpatialPadd(keys=["image", "label"], spatial_size=patch_size, method="end"),
+            EnsureTyped(keys=["image", "label"]),
+        ]
+    )
+
+
+def train_transforms_random(patch_size: tuple[int, ...]):
+    """Random augmentations — applied live after cache, never cached."""
+    return Compose(
+        [
             RandCropByPosNegLabeld(
                 keys=["image", "label"],
                 label_key="label",
@@ -137,7 +148,7 @@ def val_transforms(patch_size: tuple[int, ...]):
             LoadImaged(keys=["image", "label"]),
             EnsureChannelFirstd(keys=["image", "label"]),
             NormalizeIntensityd(keys=["image"], nonzero=True),
-            SpatialPadd(keys=["image", "label"], spatial_size=patch_size),
+            SpatialPadd(keys=["image", "label"], spatial_size=patch_size, method="end"),
             EnsureTyped(keys=["image", "label"]),
         ]
     )
@@ -274,8 +285,16 @@ def train(args):
     train_data, val_data = load_splits(args.fold, data_list, dataset_name)
     print(f"Fold {args.fold}: {len(train_data)} train, {len(val_data)} val")
 
-    train_ds = CacheDataset(train_data, transform=train_transforms(patch_size), cache_rate=0.2, num_workers=4)
-    val_ds = CacheDataset(val_data, transform=val_transforms(patch_size), cache_rate=0.2, num_workers=2)
+    # Cache only deterministic transforms (load, normalize, pad);
+    # random augmentations are applied live so every epoch sees fresh augmentations.
+    train_cache = CacheDataset(
+        train_data,
+        transform=train_transforms_deterministic(patch_size),
+        cache_rate=1.0,
+        num_workers=4,
+    )
+    train_ds = Dataset(data=train_cache, transform=train_transforms_random(patch_size))
+    val_ds = CacheDataset(val_data, transform=val_transforms(patch_size), cache_rate=1.0, num_workers=2)
 
     train_loader = DataLoader(
         train_ds,
