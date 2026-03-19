@@ -88,10 +88,9 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install -r requirements.txt
 ```
 
-### HPC (Merlin7 at PSI)
+### HPC
 ```
-The models in this project were trained on the Merlin7 cluster. Equivalent computing power is expected for complete retraining
-See [Scripts/setup/MERLIN7_GUIDE.md](Scripts/setup/MERLIN7_GUIDE.md) for full HPC instructions.
+The models in this project were trained on an HPC cluster with A100 80GB GPUs. Equivalent computing power is expected for complete retraining.
 
 ---
 
