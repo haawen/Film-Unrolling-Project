@@ -24,7 +24,7 @@ class DeformationINR(nn.Module):
     """
 
     def __init__(self, n_fourier=256, sigma=10.0, hidden_dim=256, n_layers=4,
-                 input_dim=2):
+                 input_dim=2, output_dim=2):
         super().__init__()
         self.input_dim = input_dim
 
@@ -49,8 +49,8 @@ class DeformationINR(nn.Module):
 
         self.skip_layer = skip_layer
 
-        # Output head: raw (u, v), no activation
-        self.head = nn.Linear(hidden_dim, 2)
+        # Output head: no activation, unbounded
+        self.head = nn.Linear(hidden_dim, output_dim)
 
     def encode(self, x):
         proj = 2 * math.pi * x @ self.B

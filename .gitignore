@@ -25,6 +25,11 @@ logs/
 *.nii.gz
 *.nrrd
 *.mha
+*.png
+
+# Training checkpoints and logs
+*.pt
+*.json
 
 # NumPy artifacts
 *.npy
