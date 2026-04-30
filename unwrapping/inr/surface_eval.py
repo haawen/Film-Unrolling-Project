@@ -18,6 +18,7 @@ Also saves diagnostics:
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -31,21 +32,71 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from unwrapping.inr.surface_data import SurfaceDataset
 from unwrapping.inr.unwrap_model import DeformationINR
+from unwrapping.inr.perwinding_model import PerWindingParametric
 
 
-def load_model(ckpt_path, device):
+def load_model(ckpt_path, device, n_windings_fallback=None):
     ckpt = torch.load(ckpt_path, map_location=device)
     a = ckpt["args"]
-    model = DeformationINR(
-        n_fourier=a.get("n_fourier", 256),
-        sigma=a.get("sigma", 10.0),
-        hidden_dim=a.get("hidden_dim", 256),
-        n_layers=a.get("n_layers_mlp", 4),
-        input_dim=2, output_dim=2,
-    ).to(device)
+    mt = a.get("model_type", "inr")
+    if mt == "inr":
+        model = DeformationINR(
+            n_fourier=a.get("n_fourier", 256),
+            sigma=a.get("sigma", 10.0),
+            hidden_dim=a.get("hidden_dim", 256),
+            n_layers=a.get("n_layers_mlp", 4),
+            input_dim=2, output_dim=2,
+        ).to(device)
+    elif mt == "perwinding":
+        # Recover n_windings from checkpoint (param shape) so eval works even if
+        # detection re-runs differently.
+        coeffs_shape = ckpt["model"]["coeffs"].shape
+        n_w = int(coeffs_shape[0])
+        n_h = int(coeffs_shape[2])
+        model = PerWindingParametric(
+            n_layers=n_w, n_harmonics=n_h, output_dim=2,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown model_type in ckpt: {mt}")
     model.load_state_dict(ckpt["model"])
     model.eval()
-    return model
+    return model, ckpt
+
+
+def apply_learned_eccentricity(dataset, ckpt):
+    """If the checkpoint trained with --learn-eccentricity, copy the learned
+    amp/phase onto the dataset so analytical_xy_norm applies the correction."""
+    if "ecc_amp" in ckpt and "ecc_phase" in ckpt:
+        dataset.ecc_amp = torch.tensor(
+            ckpt["ecc_amp"], device=dataset.device, requires_grad=False
+        )
+        dataset.ecc_phase = torch.tensor(
+            ckpt["ecc_phase"], device=dataset.device, requires_grad=False
+        )
+        dataset._ecc_learnable = True
+        print(f"Applied learned eccentricity: amp={ckpt['ecc_amp']:+.3f}px, "
+              f"phase={ckpt['ecc_phase']:+.3f} rad")
+    if "pw_amp" in ckpt and "pw_phase" in ckpt:
+        pw_amp = torch.tensor(
+            ckpt["pw_amp"], device=dataset.device, requires_grad=False
+        )
+        pw_phase = torch.tensor(
+            ckpt["pw_phase"], device=dataset.device, requires_grad=False
+        )
+        # Eval may have re-detected n_layers; clip to the shorter length.
+        n = min(pw_amp.numel(), dataset.n_layers)
+        dataset.pw_amp = torch.zeros(
+            (dataset.n_layers,), device=dataset.device, requires_grad=False
+        )
+        dataset.pw_phase = torch.zeros(
+            (dataset.n_layers,), device=dataset.device, requires_grad=False
+        )
+        dataset.pw_amp[:n] = pw_amp[:n]
+        dataset.pw_phase[:n] = pw_phase[:n]
+        dataset._pw_ecc_learnable = True
+        print(f"Applied per-winding ecc: |amp|_mean="
+              f"{dataset.pw_amp.abs().mean().item():.2f}px, "
+              f"max|amp|={dataset.pw_amp.abs().max().item():.2f}px")
 
 
 def build_uv_grid(dataset, n_cols, n_rows, device):
@@ -228,6 +279,140 @@ def save_surface_overlay(dataset, model, out_dir, n_samples=4000, z_slice=None):
     plt.close()
 
 
+def _resample_row_nearest(row, new_len):
+    """Nearest-neighbor resample a 1-D row to `new_len`."""
+    n_old = row.shape[0]
+    idx = np.clip(
+        np.round(np.linspace(0, n_old - 1, new_len)).astype(np.int64),
+        0, n_old - 1,
+    )
+    return row[idx]
+
+
+def _align_row_xcorr(pred, target, max_shift):
+    """Find integer shift that maximises normalised cross-correlation of pred
+    against target (both 1-D).  Returns (aligned_pred, best_shift).
+    """
+    p = (pred - pred.mean()) / (pred.std() + 1e-8)
+    t = (target - target.mean()) / (target.std() + 1e-8)
+    n = len(t)
+    best_shift, best_score = 0, -np.inf
+    for s in range(-max_shift, max_shift + 1):
+        if s >= 0:
+            a = p[s:s + n - abs(s)]
+            b = t[:n - abs(s)]
+        else:
+            a = p[:n - abs(s)]
+            b = t[abs(s):]
+        if len(a) < n // 2:
+            continue
+        score = float((a * b).mean())
+        if score > best_score:
+            best_score, best_shift = score, s
+    if best_shift >= 0:
+        aligned = np.concatenate([pred[best_shift:], pred[:best_shift]])
+    else:
+        aligned = np.concatenate([pred[best_shift:], pred[:best_shift]])
+    return aligned, best_shift, best_score
+
+
+def evaluate_against_gt(strip, gt_npz_path, dataset_n_layers, out_dir):
+    """Compute strip RMSE vs GT strip + winding-count accuracy.
+
+    strip          : (n_rows, n_cols) rendered INR strip, intensity ∈ [0, 1]
+    gt_npz_path    : path to synthetic ground_truth.npz
+    dataset_n_layers : the INR's detected winding count
+
+    Returns a dict of metrics and writes eval_metrics.json + gt_compare.png.
+    """
+    gt = np.load(gt_npz_path)
+    gt_strip = gt["strip"]                      # (n_z, strip_width)
+    gt_n_windings = int(gt["n_windings"])
+
+    n_rows_gt, W_gt = gt_strip.shape
+    n_rows, W_pred = strip.shape
+
+    # Normalise strip content to ~[0, 1] for a fair comparison.
+    # INR strip is raw CT absorption; GT strip is the source pattern before
+    # being projected through the intensity model. We invert on the CT side:
+    #   pred_content = (pred_intens - base) / (emul_max - base)
+    base = float(gt["film_base_intensity"])
+    emul_max = float(gt["emulsion_max_intensity"])
+    pred_content = np.clip((strip - base) / (emul_max - base), 0.0, 1.0)
+
+    # Resample predicted strip cols to match GT cols; crop rows to common min.
+    n_rows_common = min(n_rows, n_rows_gt)
+    pred_resized = np.stack([
+        _resample_row_nearest(pred_content[z], W_gt)
+        for z in range(n_rows_common)
+    ], axis=0)
+    gt_crop = gt_strip[:n_rows_common]
+
+    # Per-row cross-correlation to absorb seam-angle offset (circular shift).
+    max_shift = W_gt // 4
+    aligned_rows = []
+    shifts = []
+    for z in range(n_rows_common):
+        aligned, shift, _ = _align_row_xcorr(
+            pred_resized[z], gt_crop[z], max_shift
+        )
+        aligned_rows.append(aligned)
+        shifts.append(shift)
+    aligned = np.stack(aligned_rows, axis=0)
+
+    strip_rmse = float(np.sqrt(((aligned - gt_crop) ** 2).mean()))
+    strip_mae = float(np.abs(aligned - gt_crop).mean())
+
+    # Per-row correlation (circular-shift-corrected).
+    rowcorrs = []
+    for z in range(n_rows_common):
+        a = aligned[z] - aligned[z].mean()
+        t = gt_crop[z] - gt_crop[z].mean()
+        denom = (a.std() * t.std() + 1e-8) * len(a)
+        rowcorrs.append(float((a * t).sum() / denom))
+    row_corr_mean = float(np.mean(rowcorrs))
+
+    metrics = {
+        "gt_n_windings": gt_n_windings,
+        "detected_n_layers": int(dataset_n_layers),
+        "winding_detection_correct": int(dataset_n_layers) == gt_n_windings,
+        "strip_rmse": strip_rmse,
+        "strip_mae": strip_mae,
+        "row_corr_mean": row_corr_mean,
+        "median_shift_px": int(np.median(shifts)),
+        "strip_shape_pred": list(pred_resized.shape),
+        "strip_shape_gt": list(gt_crop.shape),
+    }
+
+    with open(os.path.join(out_dir, "eval_metrics.json"), "w") as f:
+        json.dump(metrics, f, indent=2)
+    print("Synthetic GT metrics:")
+    print(json.dumps(metrics, indent=2))
+
+    # Comparison figure: three rows — GT, pred (aligned), abs diff.
+    fig, axes = plt.subplots(3, 1, figsize=(24, 9))
+    axes[0].imshow(gt_crop, cmap="gray", aspect="auto", vmin=0, vmax=1,
+                   interpolation="nearest")
+    axes[0].set_title(f"GT strip ({gt_n_windings} windings)")
+    axes[1].imshow(aligned, cmap="gray", aspect="auto", vmin=0, vmax=1,
+                   interpolation="nearest")
+    axes[1].set_title(
+        f"Predicted strip (aligned; {dataset_n_layers} detected windings)  "
+        f"rmse={strip_rmse:.3f}  row-corr={row_corr_mean:.3f}"
+    )
+    axes[2].imshow(np.abs(aligned - gt_crop), cmap="magma", aspect="auto",
+                   vmin=0, vmax=0.5, interpolation="nearest")
+    axes[2].set_title("|aligned − GT|")
+    for a in axes:
+        a.set_xlabel("u")
+        a.set_ylabel("z")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "gt_compare.png"), dpi=150)
+    plt.close()
+
+    return metrics
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", required=True)
@@ -239,6 +424,17 @@ def main():
                         help="Render strip using only the analytical spiral.")
     parser.add_argument("--max-slices", type=int, default=None)
     parser.add_argument("--pixels-per-winding", type=int, default=1440)
+    parser.add_argument("--attachment", choices=["film", "emulsion", "centerline"],
+                        default="film",
+                        help="Match the attachment mode used at training time "
+                             "(affects which mask is displayed/diagnosed).")
+    parser.add_argument("--centerline-erode", type=int, default=1)
+    parser.add_argument("--winding-detector",
+                        choices=["raycast", "histogram"], default="raycast",
+                        help="Match the detector used at training.")
+    parser.add_argument("--gt-npz", type=str, default=None,
+                        help="If provided, compute synthetic GT strip-RMSE "
+                             "and winding-count metrics.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -247,7 +443,14 @@ def main():
     dataset = SurfaceDataset(
         args.data_dir, max_slices=args.max_slices, device=device,
         diag_dir=args.out_dir,
+        attachment=args.attachment, centerline_erode=args.centerline_erode,
+        winding_detector=args.winding_detector,
     )
+
+    # If a GT file is provided, override geometry so eval matches the
+    # analytical base the INR was trained under.
+    if args.gt_npz:
+        dataset.load_synthetic_gt(args.gt_npz, geometry_only=True)
 
     if args.analytical_only:
         model = None
@@ -255,7 +458,8 @@ def main():
     else:
         if args.ckpt is None:
             parser.error("--ckpt is required unless --analytical-only is set.")
-        model = load_model(args.ckpt, device)
+        model, ckpt = load_model(args.ckpt, device)
+        apply_learned_eccentricity(dataset, ckpt)
         print(f"Loaded checkpoint: {args.ckpt}")
 
     n_cols = dataset.n_layers * args.pixels_per_winding
@@ -280,6 +484,12 @@ def main():
         n_layers=dataset.n_layers,
         pixels_per_winding=args.pixels_per_winding,
     )
+
+    if args.gt_npz:
+        evaluate_against_gt(
+            result["strip"], args.gt_npz, dataset.n_layers, args.out_dir,
+        )
+
     print(f"Done.  Outputs: {args.out_dir}")
 
 

@@ -17,7 +17,7 @@ Usage:
 import argparse
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -44,6 +44,9 @@ class SpiralParams:
     air_gap: float = 4.0            # radial air gap between windings (px)
     n_z_slices: int = 5             # depth slices in the volume
     pattern: str = "frames"         # strip pattern type
+
+    # video source (only used when pattern="video")
+    video_path: Optional[str] = None
 
     # emulsion placement
     emulsion_side: str = "inner"    # "inner" or "outer" radial edge
@@ -100,13 +103,16 @@ class SpiralParams:
         return int(self.r_inner * theta_max + 0.5 * a * theta_max ** 2)
 
     def to_dict(self) -> dict:
-        return {k: getattr(self, k) for k in [
+        d = {k: getattr(self, k) for k in [
             "image_size", "n_windings", "film_thickness", "emulsion_fraction",
             "air_gap", "n_z_slices", "pattern", "emulsion_side",
             "noise_std", "eccentricity", "radial_jitter",
             "background_intensity", "film_base_intensity",
             "emulsion_max_intensity",
         ]}
+        if self.video_path is not None:
+            d["video_path"] = self.video_path
+        return d
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -147,6 +153,25 @@ PRESETS: Dict[str, SpiralParams] = {
         n_z_slices=20, noise_std=0.03, eccentricity=10.0, radial_jitter=5.0,
         pattern="frames", emulsion_side="outer",
     ),
+    # Phase 2 — real video variants (require --video <path>)
+    "video_4k": SpiralParams(
+        image_size=4096, n_windings=28, film_thickness=36, air_gap=12,
+        n_z_slices=20, pattern="video",
+    ),
+    "video_4k_imperfect": SpiralParams(
+        image_size=4096, n_windings=28, film_thickness=36, air_gap=12,
+        n_z_slices=20, noise_std=0.03, eccentricity=10.0, radial_jitter=5.0,
+        pattern="video",
+    ),
+    "video_4k_outer": SpiralParams(
+        image_size=4096, n_windings=28, film_thickness=36, air_gap=12,
+        n_z_slices=20, pattern="video", emulsion_side="outer",
+    ),
+    "video_4k_outer_harsh": SpiralParams(
+        image_size=4096, n_windings=28, film_thickness=36, air_gap=12,
+        n_z_slices=20, noise_std=0.08, eccentricity=30.0, radial_jitter=12.0,
+        pattern="video", emulsion_side="outer",
+    ),
 }
 
 
@@ -154,8 +179,13 @@ PRESETS: Dict[str, SpiralParams] = {
 # Strip Pattern Generators
 # ═══════════════════════════════════════════════════════════════════════════
 
-def generate_strip(width: int, height: int, pattern: str = "frames") -> np.ndarray:
+def generate_strip(
+    width: int, height: int, pattern: str = "frames",
+    video_path: str = None,
+) -> np.ndarray:
     """Generate a 2D test-pattern strip  (height, width)  in [0, 1]."""
+    if pattern == "video":
+        return _video_strip(width, height, video_path)
     fn = {
         "gradient": _gradient_strip,
         "bars": _bars_strip,
@@ -239,6 +269,67 @@ def _composite_strip(w: int, h: int) -> np.ndarray:
     return np.clip(
         0.7 * _frames_strip(w, h) + 0.3 * _gradient_strip(w, h), 0, 1
     )
+
+
+def _video_strip(w: int, h: int, video_path: str = None) -> np.ndarray:
+    """Build a strip from real video frames.
+
+    Extracts frames from a video file, converts to grayscale, resizes each
+    frame to (h, frame_w) and tiles them horizontally to fill the strip.
+    Values are normalised to [0, 1].
+    """
+    if video_path is None:
+        raise ValueError("video_path is required for pattern='video'")
+
+    import imageio.v3 as iio
+    from PIL import Image
+
+    video_path = str(video_path)
+    frame_w = max(200, h * 4 // 3)
+    n_frames_needed = (w + frame_w - 1) // frame_w
+
+    # Read all frames (lazy generator) and collect what we need
+    frames = []
+    for frame_rgb in iio.imiter(video_path):
+        # Convert to grayscale: standard luminance weights
+        if frame_rgb.ndim == 3 and frame_rgb.shape[2] >= 3:
+            gray = (
+                0.2989 * frame_rgb[:, :, 0].astype(np.float32)
+                + 0.5870 * frame_rgb[:, :, 1].astype(np.float32)
+                + 0.1140 * frame_rgb[:, :, 2].astype(np.float32)
+            )
+        elif frame_rgb.ndim == 2:
+            gray = frame_rgb.astype(np.float32)
+        else:
+            gray = frame_rgb[:, :, 0].astype(np.float32)
+
+        # Normalise to [0, 1]
+        gray = gray / 255.0
+
+        # Resize to (h, frame_w) using Pillow
+        pil = Image.fromarray((gray * 255).astype(np.uint8), mode="L")
+        pil = pil.resize((frame_w, h), Image.LANCZOS)
+        frames.append(np.asarray(pil).astype(np.float32) / 255.0)
+
+        if len(frames) >= n_frames_needed:
+            break
+
+    if len(frames) == 0:
+        raise ValueError(f"Could not read any frames from {video_path}")
+
+    # If video is too short, loop frames
+    while len(frames) < n_frames_needed:
+        frames.extend(frames[: n_frames_needed - len(frames)])
+
+    # Tile horizontally and trim to exact width
+    strip = np.concatenate(frames, axis=1)[:, :w]
+
+    # Clip to valid range
+    strip = np.clip(strip, 0.0, 1.0)
+
+    n_used = min(n_frames_needed, len(frames))
+    print(f"    video: {n_used} frames extracted, resized to {h}x{frame_w} each")
+    return strip
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -672,7 +763,10 @@ def generate_dataset(params: SpiralParams, output_dir: str) -> dict:
     print(f"{'=' * 60}")
 
     t0 = time.time()
-    strip = generate_strip(strip_w, params.n_z_slices, params.pattern)
+    strip = generate_strip(
+        strip_w, params.n_z_slices, params.pattern,
+        video_path=params.video_path,
+    )
     print(f"  strip generated     {time.time() - t0:.1f}s")
 
     t1 = time.time()
@@ -711,8 +805,12 @@ def main():
     parser.add_argument("--output-dir", default=None)
     parser.add_argument(
         "--pattern", default=None,
-        choices=["gradient", "bars", "frames", "composite"],
+        choices=["gradient", "bars", "frames", "composite", "video"],
         help="Override strip pattern",
+    )
+    parser.add_argument(
+        "--video", default=None, metavar="PATH",
+        help="Path to video file (sets pattern=video automatically)",
     )
     parser.add_argument(
         "--all-phase2", action="store_true",
@@ -722,13 +820,26 @@ def main():
 
     if args.all_phase2:
         for name, preset in PRESETS.items():
-            if "4k" in name:
-                out = args.output_dir or "unwrapping/synthetic/results"
-                generate_dataset(preset, f"{out}/{name}")
+            if "4k" not in name:
+                continue
+            # Skip video presets unless --video is provided
+            if preset.pattern == "video" and not args.video:
+                print(f"  Skipping {name} (needs --video <path>)")
+                continue
+            if args.video:
+                preset.video_path = args.video
+            out = args.output_dir or "unwrapping/synthetic/results"
+            generate_dataset(preset, f"{out}/{name}")
     else:
         params = PRESETS[args.preset]
-        if args.pattern:
+        if args.video:
+            params.video_path = args.video
+            if params.pattern != "video":
+                params.pattern = "video"
+        elif args.pattern:
             params.pattern = args.pattern
+        if params.pattern == "video" and not params.video_path:
+            parser.error("--video <path> is required for video presets")
         out = args.output_dir or f"unwrapping/synthetic/results/{args.preset}"
         generate_dataset(params, out)
 
