@@ -24,15 +24,41 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from unwrapping.inr.surface_data import SurfaceDataset
 from unwrapping.inr.unwrap_model import DeformationINR
 from unwrapping.inr.perwinding_model import PerWindingParametric
+from unwrapping.inr.bspline_model import BSplineDeformation
+from unwrapping.inr.grid_model import GridDeformation
+from unwrapping.inr.hash_model import HashDeformation
+from unwrapping.inr.wire_model import WIREDeformation
+from unwrapping.inr.finer_model import FINERDeformation
 from unwrapping.inr.strip_discriminator import load_discriminator
+from unwrapping.inr.patch_feature_loss import (
+    compute_patch_feature_zcoh,
+    compute_patch_feature_infonce,
+    compute_frame_periodicity_loss,
+)
 
 
 def build_model(model_type="inr", n_fourier=256, sigma=10.0, hidden_dim=256,
-                n_layers=4, n_windings=1, n_harmonics=10, device="cuda"):
+                n_layers=4, n_windings=1, n_harmonics=10,
+                bspline_u_per_winding=4, bspline_n_z=3,
+                grid_n_levels=8, grid_features=2,
+                grid_base_u=64, grid_base_z=16,
+                grid_finest_u=8192, grid_finest_z=256,
+                grid_hidden=64, grid_mlp_layers=2,
+                hash_n_levels=16, hash_features=2,
+                hash_log2_size=19, hash_base_res=16, hash_finest_res=8192,
+                hash_hidden=64, hash_mlp_layers=2,
+                wire_omega=20.0, wire_sigma=10.0,
+                finer_omega=30.0, finer_bias_k=5.0,
+                device="cuda"):
     """Residual model: zero-init so step-0 prediction == analytical_xy.
 
     model_type: "inr"        — Fourier features + MLP (DeformationINR)
                 "perwinding" — per-winding Fourier-in-θ (PerWindingParametric)
+                "bspline"    — cubic B-spline tensor product (BSplineDeformation)
+                "grid"       — G1: dense multi-res 2D feature grid (GridDeformation)
+                "hash"       — H1: Instant-NGP hash encoding (HashDeformation)
+                "wire"       — S2: WIRE Gabor wavelet MLP (WIREDeformation)
+                "finer"      — S3: FINER variable-periodic MLP (FINERDeformation)
     """
     if model_type == "inr":
         model = DeformationINR(
@@ -46,7 +72,47 @@ def build_model(model_type="inr", n_fourier=256, sigma=10.0, hidden_dim=256,
         model = PerWindingParametric(
             n_layers=n_windings, n_harmonics=n_harmonics, output_dim=2,
         ).to(device)
-        # Zero-init handled in __init__.
+    elif model_type == "bspline":
+        model = BSplineDeformation(
+            n_u_spans=bspline_u_per_winding * max(1, n_windings),
+            n_z_spans=bspline_n_z,
+            output_dim=2,
+        ).to(device)
+    elif model_type == "grid":
+        model = GridDeformation(
+            n_levels=grid_n_levels,
+            n_features_per_level=grid_features,
+            base_resolution_u=grid_base_u,
+            base_resolution_z=grid_base_z,
+            finest_resolution_u=grid_finest_u,
+            finest_resolution_z=grid_finest_z,
+            hidden_dim=grid_hidden,
+            n_layers=grid_mlp_layers,
+            output_dim=2,
+        ).to(device)
+    elif model_type == "hash":
+        model = HashDeformation(
+            n_levels=hash_n_levels,
+            n_features_per_level=hash_features,
+            log2_hashmap_size=hash_log2_size,
+            base_resolution=hash_base_res,
+            finest_resolution=hash_finest_res,
+            hidden_dim=hash_hidden,
+            n_layers=hash_mlp_layers,
+            output_dim=2,
+        ).to(device)
+    elif model_type == "wire":
+        model = WIREDeformation(
+            hidden_dim=hidden_dim, n_layers=n_layers,
+            omega=wire_omega, sigma=wire_sigma,
+            input_dim=2, output_dim=2,
+        ).to(device)
+    elif model_type == "finer":
+        model = FINERDeformation(
+            hidden_dim=hidden_dim, n_layers=n_layers,
+            omega_0=finer_omega, bias_k=finer_bias_k,
+            input_dim=2, output_dim=2,
+        ).to(device)
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
     return model
@@ -77,6 +143,7 @@ def train(args):
         diag_dir=args.out_dir,
         attachment=args.attachment, centerline_erode=args.centerline_erode,
         winding_detector=args.winding_detector,
+        data_driven_base=args.data_driven_base,
     )
 
     if args.gt_npz:
@@ -93,34 +160,139 @@ def train(args):
         n_fourier=args.n_fourier, sigma=args.sigma,
         hidden_dim=args.hidden_dim, n_layers=args.n_layers_mlp,
         n_windings=dataset.n_layers, n_harmonics=args.n_harmonics,
+        bspline_u_per_winding=args.bspline_u_per_winding,
+        bspline_n_z=args.bspline_n_z,
+        grid_n_levels=args.grid_n_levels,
+        grid_features=args.grid_features,
+        grid_base_u=args.grid_base_u, grid_base_z=args.grid_base_z,
+        grid_finest_u=args.grid_finest_u, grid_finest_z=args.grid_finest_z,
+        grid_hidden=args.grid_hidden, grid_mlp_layers=args.grid_mlp_layers,
+        hash_n_levels=args.hash_n_levels, hash_features=args.hash_features,
+        hash_log2_size=args.hash_log2_size,
+        hash_base_res=args.hash_base_res, hash_finest_res=args.hash_finest_res,
+        hash_hidden=args.hash_hidden, hash_mlp_layers=args.hash_mlp_layers,
+        wire_omega=args.wire_omega, wire_sigma=args.wire_sigma,
+        finer_omega=args.finer_omega, finer_bias_k=args.finer_bias_k,
         device=device,
     )
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {args.model_type} (2 → 2), {n_params:,} params, "
           f"zero-init for residual start")
 
-    # R2b: learnable per-theta radial correction (amp·cos(theta - phase)).
-    # Directly targets the ecc term the synthetic generator adds.
+    # A3 (joint autodecoder): a small INR g_φ(u, z) → s ∈ [0, 1] that
+    # represents the unrolled strip content. Trained jointly with f_θ. The
+    # render loss MSE(intensity_model(g_φ), CT_at_pred_xy) forces f_θ to
+    # *explain* actual CT intensities, not just sit on the emulsion. Mask-
+    # weighted so off-emulsion regions don't break the loss.
+    strip_model = None
+    if args.w_autodecoder > 0:
+        strip_model = DeformationINR(
+            n_fourier=args.strip_n_fourier, sigma=args.strip_sigma,
+            hidden_dim=args.strip_hidden_dim, n_layers=args.strip_n_layers,
+            input_dim=2, output_dim=1,
+        ).to(device)
+        # Zero-init head: sigmoid(0) = 0.5, strip starts as constant gray.
+        nn.init.zeros_(strip_model.head.weight)
+        nn.init.zeros_(strip_model.head.bias)
+        n_strip_params = sum(p.numel() for p in strip_model.parameters())
+        print(f"A3 strip INR (2 → 1), {n_strip_params:,} params, "
+              f"sigma={args.strip_sigma}, hidden={args.strip_hidden_dim}, "
+              f"L={args.strip_n_layers} → sigmoid → s ∈ [0, 1]")
+
+    # Intensity model constants. Read from GT npz when available
+    # (synthetic); for real data these would need to be estimated.
+    if args.w_autodecoder > 0 and args.gt_npz:
+        _gt = np.load(args.gt_npz)
+        strip_base = float(_gt["film_base_intensity"]) if "film_base_intensity" in _gt.files else 0.12
+        strip_max  = float(_gt["emulsion_max_intensity"]) if "emulsion_max_intensity" in _gt.files else 0.85
+        print(f"  Intensity model: base={strip_base:.3f}, max={strip_max:.3f}")
+    else:
+        strip_base, strip_max = 0.12, 0.85
+
+    # Track 2: warm-init residual weights from a prior checkpoint (curriculum).
+    if args.init_from:
+        print(f"Loading initial weights from: {args.init_from}")
+        prior = torch.load(args.init_from, map_location=device)
+        prior_state = prior["model"] if "model" in prior else prior
+        missing, unexpected = model.load_state_dict(prior_state, strict=False)
+        if missing:
+            print(f"  init-from: missing keys: {missing}")
+        if unexpected:
+            print(f"  init-from: unexpected keys: {unexpected}")
+        print(f"  init-from: loaded (optimizer state ignored).")
+
+    # Step A — anchor pose-tether: snapshot the model's residual at a fixed
+    # set of (u, z) anchor points, freeze it, then penalize drift away from
+    # that snapshot during training. Acts as a soft pseudo-GT replacing the
+    # MSE anchor that made synthetic R1PF1ws work; allows patch-feature loss
+    # to refine without finding the trivial-collapse mode.
+    anchor_uv = None
+    anchor_u_raw_t = None
+    anchor_res_init = None
+    if args.w_pose_tether > 0:
+        n_anchor = args.pose_tether_anchors
+        torch.manual_seed(0)  # deterministic anchor sampling
+        anchor_u_raw_t = torch.rand(n_anchor, device=device) * dataset.n_layers
+        anchor_z_idx = torch.randint(0, dataset.Z, (n_anchor,), device=device)
+        anchor_u_norm = anchor_u_raw_t / dataset.n_layers * 2.0 - 1.0
+        if dataset.Z > 1:
+            anchor_z_norm = anchor_z_idx.float() / (dataset.Z - 1) * 2.0 - 1.0
+        else:
+            anchor_z_norm = torch.zeros(n_anchor, device=device)
+        anchor_uv = torch.stack([anchor_u_norm, anchor_z_norm], dim=1)
+        with torch.no_grad():
+            anchor_res_init = model(anchor_uv).detach().clone()
+        print(f"Pose-tether enabled: {n_anchor} anchor (u, z) points, "
+              f"initial residual L2 mean = "
+              f"{anchor_res_init.norm(dim=1).mean().item():.4f} (normalized)")
+
+    # Analytical-base learnable parameters — composable: any subset of
+    #   --learn-eccentricity        (R2b: global amp·cos(θ−φ))
+    #   --per-winding-eccentricity  (R3 lever 2: per-winding amp_k·cos(θ−φ_k))
+    #   --per-winding-theta-phase   (A4: per-winding θ_offset[k])
+    # share a single dedicated optimizer (ecc_lr_mult × main LR, no scheduler).
+    base_params = []
     if args.learn_eccentricity:
-        ecc_params = dataset.enable_learnable_eccentricity()
-        ecc_lr = args.lr * args.ecc_lr_mult
-        ecc_optimizer = torch.optim.Adam(ecc_params, lr=ecc_lr)
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-        print(f"Learnable eccentricity enabled. ecc_lr={ecc_lr:.2e} "
-              f"({args.ecc_lr_mult}× INR LR, separate optimizer, unclipped).")
-    elif args.per_winding_eccentricity:
-        # R3 lever 2: per-winding (amp_k, phase_k) targets the synthetic jitter
-        # that a single global (amp, phase) cannot fit. Same separate-optimizer
-        # trick as global ecc.
-        pw_params = dataset.enable_per_winding_eccentricity()
-        ecc_lr = args.lr * args.ecc_lr_mult
-        ecc_optimizer = torch.optim.Adam(pw_params, lr=ecc_lr)
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        base_params += dataset.enable_learnable_eccentricity()
+        print("Learnable global eccentricity enabled (2 scalars).")
+    if args.per_winding_eccentricity:
+        base_params += dataset.enable_per_winding_eccentricity()
         print(f"Per-winding eccentricity enabled "
-              f"({dataset.n_layers} windings × 2 scalars). "
-              f"ecc_lr={ecc_lr:.2e} ({args.ecc_lr_mult}× INR LR).")
+              f"({dataset.n_layers} windings × 2 scalars).")
+    if args.per_winding_theta_phase:
+        base_params += dataset.enable_per_winding_theta_phase()
+        print(f"A4: per-winding angular phase enabled "
+              f"({dataset.n_layers} scalars).")
+
+    if base_params:
+        ecc_lr = args.lr * args.ecc_lr_mult
+        ecc_optimizer = torch.optim.Adam(base_params, lr=ecc_lr)
+        print(f"  Base-params optimizer: lr={ecc_lr:.2e} "
+              f"({args.ecc_lr_mult}× INR LR, no cosine).")
     else:
         ecc_optimizer = None
+    # Main optimizer: f_θ params + strip g_φ params (when A3 enabled). Joint
+    # update with the same LR; cosine schedule applies to both.
+    # Grid/hash models use a split LR: the explicit feature parameters get a
+    # higher LR (default 100× the MLP's) — this is standard for grid-based
+    # INRs and matters for convergence.
+    if args.model_type in ("grid", "hash") and hasattr(model, "param_groups"):
+        encoder_lr = args.lr * args.encoder_lr_mult
+        param_groups = model.param_groups(grid_lr=encoder_lr, mlp_lr=args.lr) \
+            if args.model_type == "grid" \
+            else model.param_groups(hash_lr=encoder_lr, mlp_lr=args.lr)
+        if strip_model is not None:
+            param_groups.append({"params": list(strip_model.parameters()),
+                                 "lr": args.lr})
+        optimizer = torch.optim.Adam(param_groups)
+        print(f"  Optimizer: encoder lr={encoder_lr:.2e}, MLP lr={args.lr:.2e} "
+              f"({args.encoder_lr_mult}× split for --model-type {args.model_type})")
+    elif strip_model is not None:
+        optimizer = torch.optim.Adam(
+            list(model.parameters()) + list(strip_model.parameters()),
+            lr=args.lr,
+        )
+    else:
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.steps)
 
@@ -153,11 +325,40 @@ def train(args):
             z_idx = batch["z_idx"]
             xy_target = batch["xy_target"]
 
+            # Z3 diagnostic: how robust is the supervised path to LABEL NOISE?
+            # If MAPS (skeleton-derived pseudo-u) gives noisy labels, this tells
+            # us the noise budget. xy_target is in normalized [-1, 1]; px
+            # noise = norm_noise * (W-1)/2. Default 0 = clean GT.
+            if args.label_noise_px > 0:
+                noise_norm_x = args.label_noise_px / max(1.0, (dataset.W - 1) / 2.0)
+                noise_norm_y = args.label_noise_px / max(1.0, (dataset.H - 1) / 2.0)
+                noise = torch.randn_like(xy_target)
+                noise[:, 0] *= noise_norm_x
+                noise[:, 1] *= noise_norm_y
+                xy_target = xy_target + noise
+
             xy_base = dataset.analytical_xy_norm(u_raw)
             xy_res = model(uv)
             pred_xy = xy_base + xy_res
 
             l_mse = ((pred_xy - xy_target) ** 2).mean()
+
+            # Strip-intensity MSE (auxiliary loss-side lever, R3).
+            # coord-MSE alone has many local minima with similar values but
+            # very different SSIM. Adding MSE(CT[pred_xy], CT[xy_target])
+            # weights coord errors by local CT gradient — small in smooth
+            # emulsion regions, large near frame boundaries — which directly
+            # tracks SSIM. dataset.sample_image is bilinear and differentiable.
+            l_strip_mse_val = 0.0
+            if args.w_strip_mse > 0:
+                intens_pred = dataset.sample_image(pred_xy, z_idx)
+                with torch.no_grad():
+                    intens_target = dataset.sample_image(xy_target, z_idx)
+                l_strip_mse = ((intens_pred - intens_target) ** 2).mean()
+                l_strip_mse_val = float(l_strip_mse.item())
+            else:
+                l_strip_mse = torch.tensor(0.0, device=device)
+
             # Attachment + conformal tracked for logging only during warm-start.
             with torch.no_grad():
                 if args.use_distance_attach:
@@ -171,14 +372,21 @@ def train(args):
             l_res_reg_val = float((xy_res.detach() ** 2).sum(dim=1).mean().item())
             l_zcoh_val = 0.0
             l_band_val = 0.0
+            l_radial_cap_val = 0.0
             l_wcc_val = 0.0
             l_speed_val = 0.0
             l_intensity_val = 0.0
             l_int_zcoh_val = 0.0
             l_strip_q_val = 0.0
             l_disc_val = 0.0
+            l_patch_feat_val = 0.0
+            l_frame_period_val = 0.0
+            l_maps_val = 0.0
+            l_render_val = 0.0
+            l_infonce_val = 0.0
+            l_tether_val = 0.0
             E_mean = G_mean = F_mean = 0.0
-            loss = l_mse
+            loss = l_mse + args.w_strip_mse * l_strip_mse
         else:
             batch = dataset.sample(args.batch_size)
             uv = batch["uv_norm"].detach().clone().requires_grad_(True)
@@ -236,6 +444,32 @@ def train(args):
                 under = torch.relu(r_lo - r_pred)
                 l_band = (over ** 2 + under ** 2).mean()
                 l_band_val = float(l_band.item())
+
+            # B3 (radial residual cap): penalize the radial component of
+            # (pred_xy − analytical_xy) when it exceeds half the local layer
+            # spacing. Encodes "do not hop into a neighbour winding" relative
+            # to where the analytical base actually sits (emulsion-offset
+            # applied), unlike --w-winding-band which uses film-centerline
+            # boundaries. Quadratic outside the band → zero gradient when
+            # inside, so it does not fight small SS-driven corrections.
+            l_radial_cap_val = 0.0
+            if args.w_radial_cap > 0:
+                base_x_px = (xy_base[:, 0] + 1.0) * 0.5 * (dataset.W - 1)
+                base_y_px = (xy_base[:, 1] + 1.0) * 0.5 * (dataset.H - 1)
+                r_base = torch.sqrt(
+                    (base_x_px - dataset.cx) ** 2
+                    + (base_y_px - dataset.cy) ** 2
+                )
+                pred_x_px = (pred_xy[:, 0] + 1.0) * 0.5 * (dataset.W - 1)
+                pred_y_px = (pred_xy[:, 1] + 1.0) * 0.5 * (dataset.H - 1)
+                r_pred = torch.sqrt(
+                    (pred_x_px - dataset.cx) ** 2
+                    + (pred_y_px - dataset.cy) ** 2
+                )
+                cap_px = 0.5 * dataset.layer_spacing
+                over = torch.relu((r_pred - r_base).abs() - cap_px)
+                l_radial_cap = (over ** 2).mean()
+                l_radial_cap_val = float(l_radial_cap.item())
 
             # R3 lever "winding-label CC": sample the precomputed per-pixel
             # winding-label volume (CC on eroded film, ordered by radius,
@@ -339,7 +573,20 @@ def train(args):
                                ).round().long().clamp(0, dataset.Z - 1)
                         I_a = dataset.sample_image(pred_a, z_a)
                         I_b = dataset.sample_image(pred_b, z_b)
-                        l_int_zcoh = ((I_a - I_b) ** 2).mean()
+                        if args.mask_weight_int_zcoh:
+                            # Z2: mask-weight to prevent the closed R1B4/B5 mode
+                            # (off-emulsion uniform-region collapse). With the
+                            # mask gate, the off-emulsion regions contribute 0
+                            # to z-coh so attachment dominates; z-coh only
+                            # constrains the mapping where it's actually on
+                            # the emulsion.
+                            M_a = dataset.sample_mask(pred_a, z_a).detach()
+                            M_b = dataset.sample_mask(pred_b, z_b).detach()
+                            w_pair = (M_a * M_b).clamp(0.0, 1.0)
+                            w_sum = w_pair.sum().clamp(min=1.0)
+                            l_int_zcoh = (((I_a - I_b) ** 2) * w_pair).sum() / w_sum
+                        else:
+                            l_int_zcoh = ((I_a - I_b) ** 2).mean()
                         l_int_zcoh_val = float(l_int_zcoh.item())
 
             # Strip-quality loss (Path C): differentiable proxies that mirror
@@ -447,6 +694,8 @@ def train(args):
                 loss = loss + args.w_z_coherence * l_zcoh
             if args.w_winding_band > 0:
                 loss = loss + args.w_winding_band * l_band
+            if args.w_radial_cap > 0:
+                loss = loss + args.w_radial_cap * l_radial_cap
             if args.w_winding_cc > 0:
                 loss = loss + args.w_winding_cc * l_wcc
             if args.w_arc_speed > 0:
@@ -459,12 +708,140 @@ def train(args):
                 loss = loss + args.w_strip_quality * l_strip_q
             if discriminator is not None and args.w_discriminator > 0:
                 loss = loss + args.w_discriminator * l_disc
+            # Step A — pose-tether: residual at anchor points should stay
+            # close to its initial value. Replaces the MSE-supervised anchor
+            # that made R1PF1ws work on synthetic; required when no GT exists
+            # to prevent the patch-feature trivial-collapse mode on real.
+            l_tether_val = 0.0
+            if args.w_pose_tether > 0 and anchor_uv is not None:
+                # Sample subset of anchor points for this step.
+                n_sub = min(args.pose_tether_batch, anchor_uv.shape[0])
+                idx_sub = torch.randint(
+                    0, anchor_uv.shape[0], (n_sub,), device=device
+                )
+                sub_uv = anchor_uv[idx_sub]
+                sub_init = anchor_res_init[idx_sub]
+                sub_res_now = model(sub_uv)
+                l_tether = ((sub_res_now - sub_init) ** 2).sum(dim=1).mean()
+                l_tether_val = float(l_tether.item())
+                loss = loss + args.w_pose_tether * l_tether
+
+            # Track 4: DCT patch-feature z-coherence (fixed feature extractor;
+            # not gameable like the trainable discriminator).
+            l_patch_feat_val = 0.0
+            if args.w_patch_feature_zcoh > 0 and dataset.Z >= 2:
+                l_patch_feat = compute_patch_feature_zcoh(
+                    dataset, model,
+                    n_patches=args.patch_feature_n_patches,
+                    patch_w=args.patch_feature_w,
+                    n_dct_keep=args.patch_feature_n_dct,
+                    target_norm=args.patch_feature_target_norm,
+                )
+                loss = loss + args.w_patch_feature_zcoh * l_patch_feat
+                l_patch_feat_val = float(l_patch_feat.item())
+
+            # Step B: InfoNCE contrastive patch loss. Forbids trivial collapse
+            # by construction — if all (u, z) map to one patch, batch features
+            # converge and InfoNCE explodes to log(n_anchors).
+            l_infonce_val = 0.0
+            if args.w_patch_feature_infonce > 0 and dataset.Z >= 2:
+                l_infonce = compute_patch_feature_infonce(
+                    dataset, model,
+                    n_anchors=args.infonce_n_anchors,
+                    patch_w=args.patch_feature_w,
+                    n_dct_keep=args.patch_feature_n_dct,
+                    temperature=args.infonce_temperature,
+                )
+                loss = loss + args.w_patch_feature_infonce * l_infonce
+                l_infonce_val = float(l_infonce.item())
+
+            # Z1 (MAPS): soft pseudo-supervision from raycast per-angle
+            # centerlines. The centerlines give per-(winding, angle) → (x, y)
+            # mapping; we compute the matching arc-length u and supervise
+            # pred_xy(u, z) ≈ centerline_xy. Synth geometry is z-invariant so
+            # the same (u, xy) labels apply at every z. Low weight: soft
+            # tie-breaker among the many on-emulsion mappings that satisfy
+            # attachment+conformal.
+            l_maps_val = 0.0
+            if args.w_maps > 0:
+                maps_batch = dataset.sample_maps_labels(args.maps_batch_size)
+                if maps_batch is not None:
+                    uv_m = maps_batch["uv_norm"]
+                    u_m = maps_batch["u_raw"]
+                    z_m = maps_batch["z_idx"]
+                    xy_t = maps_batch["xy_target"]
+                    base_m = dataset.analytical_xy_norm(u_m)
+                    res_m = model(uv_m)
+                    pred_m = base_m + res_m
+                    l_maps = ((pred_m - xy_t) ** 2).mean()
+                    loss = loss + args.w_maps * l_maps
+                    l_maps_val = float(l_maps.item())
+
+            # A3: joint autodecoder render loss. Strip g_φ(u,z) → s,
+            # intensity_pred = base + s·(max - base), compared to actual
+            # CT at pred_xy. Mask-weighted: off-emulsion contributes 0 so
+            # attachment continues to drive the geometry. Ramped from 0 to
+            # full weight over args.autodecoder_ramp_steps starting at
+            # args.autodecoder_start_step, so f_θ first reaches the manifold
+            # before the render loss adds pressure.
+            l_render_val = 0.0
+            if strip_model is not None:
+                ramp = max(0.0, min(
+                    1.0,
+                    (step - args.autodecoder_start_step) / max(
+                        1, args.autodecoder_ramp_steps
+                    ),
+                ))
+                if ramp > 0:
+                    # Sample strip content at the same (u, z) anchors used
+                    # by attachment. uv is already in normalized coords.
+                    s_pred = torch.sigmoid(strip_model(uv).squeeze(-1))  # (B,)
+                    intensity_pred = strip_base + s_pred * (strip_max - strip_base)
+                    intensity_gt = dataset.sample_image(pred_xy, z_idx)
+                    # Mask-weight to gate off-emulsion samples (detached so
+                    # we don't try to push pred_xy onto emulsion via the
+                    # render loss — that's attachment's job).
+                    M = dataset.sample_mask(pred_xy, z_idx).detach()
+                    M_sum = M.sum().clamp(min=1.0)
+                    l_render = (((intensity_pred - intensity_gt) ** 2) * M).sum() / M_sum
+                    # Optional strip-smoothness TV (penalize ∂s/∂u, ∂s/∂z).
+                    if args.w_strip_tv > 0:
+                        s_grad = torch.autograd.grad(
+                            s_pred.sum(), uv,
+                            create_graph=True, retain_graph=True,
+                        )[0]
+                        l_strip_tv = (s_grad ** 2).mean()
+                        l_render = l_render + args.w_strip_tv * l_strip_tv
+                    loss = loss + args.w_autodecoder * ramp * l_render
+                    l_render_val = float(l_render.item())
+
+            # A1: frame-period periodicity on the implied strip. Pairs
+            # patches at (u, z) and (u + frame_period_u, z); same shape as
+            # the DCT z-coh loss but with a PHYSICAL period along u rather
+            # than data-driven z-adjacency.
+            l_frame_period_val = 0.0
+            if args.w_frame_periodicity > 0:
+                l_frame_period = compute_frame_periodicity_loss(
+                    dataset, model,
+                    n_patches=args.patch_feature_n_patches,
+                    patch_w=args.patch_feature_w,
+                    n_dct_keep=args.patch_feature_n_dct,
+                    frame_period_u=args.frame_period_u,
+                    target_norm=args.patch_feature_target_norm,
+                )
+                loss = loss + args.w_frame_periodicity * l_frame_period
+                l_frame_period_val = float(l_frame_period.item())
             if args.learn_eccentricity:
                 # Weak L2 prior on amplitude (keeps fit from absorbing jitter).
                 loss = loss + args.w_ecc_prior * dataset.ecc_amp ** 2
             if args.per_winding_eccentricity:
                 # L2 prior on per-winding amplitudes; small to allow real jitter.
                 loss = loss + args.w_ecc_prior * (dataset.pw_amp ** 2).mean()
+            if args.per_winding_theta_phase:
+                # A4: L2 prior on θ_offset[k] to keep phase shifts modest.
+                loss = loss + args.w_theta_phase_prior * (
+                    dataset.theta_offset ** 2
+                ).mean()
             l_mse = torch.tensor(0.0, device=device)
             l_conformal_val = float(l_conformal.item())
             l_res_reg_val = float(l_res_reg.item())
@@ -475,8 +852,17 @@ def train(args):
             ecc_optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        if ecc_optimizer is not None:
+        # A5: two-stage refine→freeze→residual.
+        #   stage 1 (step < two_stage_base_steps): base params only, INR frozen.
+        #   stage 2 (step ≥ two_stage_base_steps): INR only, base frozen.
+        # When two_stage_base_steps == 0 (default) both step every iter (joint).
+        in_stage1 = (args.two_stage_base_steps > 0
+                     and step < args.two_stage_base_steps)
+        in_stage2 = (args.two_stage_base_steps > 0
+                     and step >= args.two_stage_base_steps)
+        if not in_stage1:
+            optimizer.step()
+        if ecc_optimizer is not None and not in_stage2:
             ecc_optimizer.step()
         scheduler.step()
 
@@ -500,6 +886,9 @@ def train(args):
                 "l_int_zcoh": l_int_zcoh_val,
                 "l_strip_q": l_strip_q_val,
                 "l_disc": l_disc_val,
+                "l_patch_feat": l_patch_feat_val if not supervised_phase else 0.0,
+                "l_infonce": l_infonce_val if not supervised_phase else 0.0,
+                "l_tether": l_tether_val if not supervised_phase else 0.0,
                 "E": E_mean, "G": G_mean, "F": F_mean,
                 "res_px": res_px,
                 "lr": optimizer.param_groups[0]["lr"],
@@ -531,6 +920,10 @@ def train(args):
 
     log_file.close()
     ckpt = {"model": model.state_dict(), "step": args.steps, "args": vars(args)}
+    if strip_model is not None:
+        ckpt["strip_model"] = strip_model.state_dict()
+        ckpt["strip_base"] = strip_base
+        ckpt["strip_max"] = strip_max
     if args.learn_eccentricity:
         ckpt["ecc_amp"] = float(dataset.ecc_amp.item())
         ckpt["ecc_phase"] = float(dataset.ecc_phase.item())
@@ -543,6 +936,12 @@ def train(args):
               f"[{dataset.pw_amp.min().item():+.2f}, "
               f"{dataset.pw_amp.max().item():+.2f}]px, "
               f"|amp|_mean={dataset.pw_amp.abs().mean().item():.2f}px")
+    if args.per_winding_theta_phase:
+        ckpt["theta_offset"] = dataset.theta_offset.detach().cpu().tolist()
+        to = dataset.theta_offset.detach()
+        print(f"  A4 θ_offset range: "
+              f"[{to.min().item():+.4f}, {to.max().item():+.4f}] rad, "
+              f"|θ|_mean={to.abs().mean().item():.4f} rad")
     torch.save(ckpt, os.path.join(args.out_dir, "model_final.pt"))
 
     # Save dataset geometry (needed by eval for analytical_xy_norm)
@@ -555,6 +954,10 @@ def train(args):
         "z_indices": dataset.z_indices.tolist(),
         "ecc_amp": float(dataset.ecc_amp.item()) if args.learn_eccentricity else 0.0,
         "ecc_phase": float(dataset.ecc_phase.item()) if args.learn_eccentricity else 0.0,
+        "theta_offset": (
+            dataset.theta_offset.detach().cpu().tolist()
+            if args.per_winding_theta_phase else []
+        ),
     }
     with open(os.path.join(args.out_dir, "geometry.json"), "w") as f:
         json.dump(geometry, f, indent=2)
@@ -577,6 +980,14 @@ def main():
 
     parser.add_argument("--w-attach", type=float, default=1.0)
     parser.add_argument("--w-conformal", type=float, default=0.1)
+    parser.add_argument("--w-strip-mse", type=float, default=0.0,
+                        help="R3 (loss-side): MSE between CT-sampled intensity "
+                             "at pred_xy vs at xy_target during R1S. Targets "
+                             "SSIM directly by weighting coord errors by local "
+                             "CT gradient. 0 = off (legacy R1S coord-MSE only). "
+                             "Try 1.0 / 5.0 / 10.0 to start; CT-intensity range "
+                             "is ≈[0.12, 0.85] so a per-sample intens-MSE term "
+                             "is O(1e-2) — needs a non-trivial weight to matter.")
     parser.add_argument("--w-res-reg", type=float, default=0.0,
                         help="L2 penalty on xy_res magnitude (anchors residual "
                              "near zero; prevents drift when attachment gradient "
@@ -596,13 +1007,43 @@ def main():
     parser.add_argument("--per-winding-eccentricity", action="store_true",
                         help="Per-winding (amp_k, phase_k): r_k += "
                              "amp_k·cos(theta − phase_k). 2·n_layers params, "
-                             "trained by the same dedicated optimizer as "
-                             "--learn-eccentricity. Mutually exclusive.")
+                             "trained by the dedicated base-params optimizer. "
+                             "Composes with --learn-eccentricity and "
+                             "--per-winding-theta-phase.")
+    parser.add_argument("--per-winding-theta-phase", action="store_true",
+                        help="A4: per-winding angular phase θ_offset[k] added "
+                             "to θ in the analytical base. n_layers scalars, "
+                             "linearly interpolated between adjacent windings. "
+                             "Trained by the base-params optimizer. Targets "
+                             "global+per-winding angular misalignment "
+                             "(median_shift > 0 on SS imperfect) that the INR "
+                             "residual learns slowly via σ=20 Fourier features. "
+                             "L2-regularize via --w-theta-phase-prior.")
+    parser.add_argument("--w-theta-phase-prior", type=float, default=1e-4,
+                        help="L2 prior on θ_offset to discourage runaway "
+                             "phase shifts; small to allow real per-winding "
+                             "phase errors (expected |θ_offset| < 0.05 rad).")
+    parser.add_argument("--two-stage-base-steps", type=int, default=0,
+                        help="A5: coordinate descent. For the first N steps "
+                             "step ONLY the analytical-base optimizer (ecc / "
+                             "per-winding ecc / θ_offset), keeping the INR "
+                             "head frozen at zero-init. After step N, freeze "
+                             "base params and step ONLY the INR optimizer. "
+                             "0 (default) = joint optimization, current "
+                             "behavior. Requires at least one base-param "
+                             "flag (else stage 1 is a no-op).")
     parser.add_argument("--w-winding-band", type=float, default=0.0,
                         help="Soft-hinge penalty: pred_xy radial position "
                              "should fall in the boundary-band of the expected "
                              "winding (=floor(u_raw)). Breaks the radial "
                              "degeneracy that lets attachment hop windings.")
+    parser.add_argument("--w-radial-cap", type=float, default=0.0,
+                        help="B3: soft cap on |r_pred − r_analytical| at half "
+                             "the local layer_spacing. Quadratic outside the "
+                             "cap, zero inside — does not fight small SS "
+                             "corrections. Different from --w-winding-band: "
+                             "this is relative to the (emulsion-offset) "
+                             "analytical base, not to film centerlines.")
     parser.add_argument("--w-winding-cc", type=float, default=0.0,
                         help="CC-based winding-label penalty: builds a "
                              "per-pixel winding-number volume from connected "
@@ -636,6 +1077,62 @@ def main():
                         help="Normal offset δ in pixels for intensity loss.")
     parser.add_argument("--intensity-margin", type=float, default=0.05,
                         help="Margin in normalized intensity for the relu.")
+    parser.add_argument("--w-autodecoder", type=float, default=0.0,
+                        help="A3: joint autodecoder weight. Co-learns a strip "
+                             "INR g_φ(u,z)→s and uses MSE(base+s·(max-base), "
+                             "CT_at_pred_xy) as a render loss, mask-gated to "
+                             "on-emulsion samples. Forces pred_xy to *explain* "
+                             "actual CT intensities rather than just sitting "
+                             "on the emulsion. Recommended: 1.0 with ramp.")
+    parser.add_argument("--autodecoder-start-step", type=int, default=500,
+                        help="Step at which the render-loss ramp begins. "
+                             "Before this step, render loss is 0 so f_θ can "
+                             "first reach the on-emulsion manifold without "
+                             "fighting an immature strip.")
+    parser.add_argument("--autodecoder-ramp-steps", type=int, default=1000,
+                        help="Linear ramp length (in steps) from 0 to full "
+                             "w-autodecoder weight after the start step.")
+    parser.add_argument("--w-strip-tv", type=float, default=0.0,
+                        help="Optional TV regularizer on s(u, z) — penalizes "
+                             "|∂s/∂u|² + |∂s/∂z|² to keep the learned strip "
+                             "smooth. 0 = off.")
+    parser.add_argument("--strip-n-fourier", type=int, default=128,
+                        help="Strip INR Fourier feature count (smaller than "
+                             "f_θ; strip is single-channel + smooth).")
+    parser.add_argument("--strip-sigma", type=float, default=20.0,
+                        help="Strip INR Fourier σ — matches f_θ default 20 "
+                             "so the strip can represent ~28-winding content.")
+    parser.add_argument("--strip-hidden-dim", type=int, default=128,
+                        help="Strip INR hidden dim (small: limits capacity "
+                             "so g_φ can't memorize arbitrary CT for any f_θ).")
+    parser.add_argument("--strip-n-layers", type=int, default=2,
+                        help="Strip INR MLP depth.")
+    parser.add_argument("--w-maps", type=float, default=0.0,
+                        help="Z1: weight for medial-axis pseudo-supervision "
+                             "(MAPS). Soft MSE against per-(winding, angle) "
+                             "centerlines from the raycast detector. Gives "
+                             "the model an angular signal at every (u, z) "
+                             "that pure SS attachment+conformal lacks. "
+                             "Recommended: 0.01-1.0 (start at 0.1).")
+    parser.add_argument("--maps-batch-size", type=int, default=8192,
+                        help="Batch size for MAPS labels (smaller than main "
+                             "batch since labels are denser per loss unit).")
+    parser.add_argument("--label-noise-px", type=float, default=0.0,
+                        help="Z3: σ (in pixels) of Gaussian noise added to "
+                             "GT xy_target during supervised training. "
+                             "Diagnostic: measures the noise budget the "
+                             "supervised path can tolerate, which bounds how "
+                             "noisy a pseudo-supervision signal (e.g. MAPS) "
+                             "can be before it stops helping. 0 = clean GT "
+                             "(default = identical to current R1S).")
+    parser.add_argument("--mask-weight-int-zcoh", action="store_true",
+                        help="Z2: gate intensity z-coh by sample_mask product "
+                             "so off-emulsion pairs contribute 0. Without this "
+                             "gate the loss is closed (R1B4/B5: trivial "
+                             "collapse to uniform film-base). With it the loss "
+                             "only constrains the mapping where it's actually "
+                             "on the emulsion, attachment dominates the off-"
+                             "manifold drift mode. Used with --w-intensity-zcoh.")
     parser.add_argument("--w-intensity-zcoh", type=float, default=0.0,
                         help="Intensity z-coherence weight (Path B v2). "
                              "Penalizes |I(pred(u,z_a)) - I(pred(u,z_b))|² "
@@ -659,6 +1156,61 @@ def main():
                              "(Path D: Vesuvius-style ink-detector).")
     parser.add_argument("--w-discriminator", type=float, default=0.0,
                         help="Weight of the discriminator loss.")
+    parser.add_argument("--w-pose-tether", type=float, default=0.0,
+                        help="Step A: anchor pose-tether weight. At step 0, "
+                             "snapshot the model residual at a fixed set of "
+                             "(u, z) anchor points; penalize drift from that "
+                             "snapshot during training. Replaces the MSE "
+                             "anchor that made synthetic R1PF1ws work on "
+                             "real data where no GT exists. 0 disables.")
+    parser.add_argument("--pose-tether-anchors", type=int, default=65536,
+                        help="Number of fixed anchor (u, z) points whose "
+                             "initial residual is snapshotted.")
+    parser.add_argument("--pose-tether-batch", type=int, default=16384,
+                        help="Number of anchor points re-evaluated per step.")
+    parser.add_argument("--w-patch-feature-zcoh", type=float, default=0.0,
+                        help="Track 4: DCT patch-feature z-coherence weight. "
+                             "Renders strip patches at pred_xy(u, z_a) and "
+                             "pred_xy(u, z_b=z_a+1), takes per-patch DCT "
+                             "(drop DC, keep K coeffs), penalizes 1 - "
+                             "cos_sim(feat_a, feat_b) + magnitude floor. "
+                             "Fixed feature extractor (not gameable). 0 disables.")
+    parser.add_argument("--patch-feature-n-patches", type=int, default=64,
+                        help="Number of (u_start, z_a) patch pairs per step.")
+    parser.add_argument("--patch-feature-w", type=int, default=64,
+                        help="Patch width in strip-pixels (= number of u "
+                             "samples per patch).")
+    parser.add_argument("--patch-feature-n-dct", type=int, default=16,
+                        help="Number of mid-frequency DCT coefficients kept "
+                             "(after dropping DC).")
+    parser.add_argument("--w-patch-feature-infonce", type=float, default=0.0,
+                        help="Step B: InfoNCE contrastive patch-feature "
+                             "weight. Trivial collapse forbidden by "
+                             "construction (if all (u,z) → one patch, "
+                             "positives = negatives, InfoNCE → log(N)). "
+                             "0 disables.")
+    parser.add_argument("--infonce-n-anchors", type=int, default=64,
+                        help="Batch size for InfoNCE patch-feature loss.")
+    parser.add_argument("--infonce-temperature", type=float, default=0.1,
+                        help="Softmax temperature for InfoNCE. Lower = "
+                             "harder contrast.")
+    parser.add_argument("--w-frame-periodicity", type=float, default=0.0,
+                        help="A1: frame-period periodicity loss on the "
+                             "implied strip. Pairs patches at u and "
+                             "u + frame_period_u along the same z; cosine-"
+                             "distance + magnitude floor (same shape as DCT "
+                             "z-coh but with a physical u-period rather than "
+                             "data-driven z-adjacency).")
+    parser.add_argument("--frame-period-u", type=float, default=0.0665,
+                        help="Frame pitch in u-units (winding fractions). "
+                             "For HQ video presets (n_z=256, frame_w=341 px, "
+                             "total_arc=143558, n_layers=28): "
+                             "frame_period_u = 341/143558*28 ≈ 0.0665. "
+                             "Compute from the generator, do not fit.")
+    parser.add_argument("--patch-feature-target-norm", type=float, default=0.05,
+                        help="L2-norm floor on feature vectors. Patches with "
+                             "weaker content than this are penalized to "
+                             "prevent collapse to uniform regions.")
     parser.add_argument("--disc-n-patches", type=int, default=32,
                         help="Number of patches per training step for "
                              "discriminator loss. Patch dims are (n_z, "
@@ -668,15 +1220,72 @@ def main():
     parser.add_argument("--sigma", type=float, default=10.0)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--n-layers-mlp", type=int, default=4)
-    parser.add_argument("--model-type", choices=["inr", "perwinding"],
+    parser.add_argument("--bspline-u-per-winding", type=int, default=4,
+                        help="Cubic B-spline u-spans per winding (Track 3). "
+                             "Default 4 = enough for 3-component sinusoidal "
+                             "jitter with per-winding phase. Total u-spans = "
+                             "this × n_windings; control points = +3.")
+    parser.add_argument("--bspline-n-z", type=int, default=3,
+                        help="Cubic B-spline z-spans. Default 3 = mostly "
+                             "z-invariant deformation (synthetic geometry "
+                             "is z-constant).")
+    parser.add_argument("--model-type",
+                        choices=["inr", "perwinding", "bspline",
+                                 "grid", "hash", "wire", "finer"],
                         default="inr",
                         help="Residual model architecture. inr (default): "
-                             "Fourier features + MLP with shared weights "
-                             "across windings. perwinding: independent "
-                             "Fourier-in-θ series per winding (no cross-"
-                             "winding weight sharing).")
+                             "Fourier features + MLP. perwinding/bspline: "
+                             "structured parametrics. grid: G1 dense multi-"
+                             "resolution 2D feature grid. hash: H1 Instant-"
+                             "NGP hash encoding (pure PyTorch). wire: S2 "
+                             "WIRE Gabor wavelet MLP. finer: S3 FINER "
+                             "variable-periodic MLP.")
     parser.add_argument("--n-harmonics", type=int, default=10,
                         help="Harmonics per winding for --model-type perwinding.")
+
+    # Encoder/MLP LR split, used by grid/hash models.
+    parser.add_argument("--encoder-lr-mult", type=float, default=100.0,
+                        help="Multiplier on --lr for the explicit feature "
+                             "encoder (grid planes or hash tables). Standard "
+                             "100× for grid-based INRs; the MLP head keeps "
+                             "--lr. Ignored for non-grid/-hash models.")
+
+    # G1 dense feature grid (--model-type grid).
+    parser.add_argument("--grid-n-levels", type=int, default=8)
+    parser.add_argument("--grid-features", type=int, default=2,
+                        help="Features per level (G1).")
+    parser.add_argument("--grid-base-u", type=int, default=64)
+    parser.add_argument("--grid-base-z", type=int, default=16)
+    parser.add_argument("--grid-finest-u", type=int, default=8192,
+                        help="Finest u-resolution (G1). Set high — u-axis "
+                             "is ≈143k px effective on HQ presets.")
+    parser.add_argument("--grid-finest-z", type=int, default=256)
+    parser.add_argument("--grid-hidden", type=int, default=64)
+    parser.add_argument("--grid-mlp-layers", type=int, default=2)
+
+    # H1 hash encoding (--model-type hash).
+    parser.add_argument("--hash-n-levels", type=int, default=16)
+    parser.add_argument("--hash-features", type=int, default=2)
+    parser.add_argument("--hash-log2-size", type=int, default=19,
+                        help="log2(T): table size = 2**this per level.")
+    parser.add_argument("--hash-base-res", type=int, default=16)
+    parser.add_argument("--hash-finest-res", type=int, default=8192,
+                        help="Finest grid resolution (H1).")
+    parser.add_argument("--hash-hidden", type=int, default=64)
+    parser.add_argument("--hash-mlp-layers", type=int, default=2)
+
+    # S2 WIRE (--model-type wire).
+    parser.add_argument("--wire-omega", type=float, default=20.0,
+                        help="Gabor sine frequency for WIRE.")
+    parser.add_argument("--wire-sigma", type=float, default=10.0,
+                        help="Gabor Gaussian width for WIRE.")
+
+    # S3 FINER (--model-type finer).
+    parser.add_argument("--finer-omega", type=float, default=30.0,
+                        help="SIREN-style omega_0 for FINER.")
+    parser.add_argument("--finer-bias-k", type=float, default=5.0,
+                        help="FINER bias-init range U(-k, k). k>1 unlocks "
+                             "higher frequencies per the CVPR 2024 paper.")
 
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=0,
@@ -699,6 +1308,19 @@ def main():
                         help="If > 0, first N steps train with MSE vs GT "
                              "u_map (requires --gt-npz), then switch to "
                              "self-supervised attachment+conformal.")
+    parser.add_argument("--data-driven-base", action="store_true",
+                        help="Track 1: use per-angle centerline radii from "
+                             "the raycast detector as the analytical base, "
+                             "instead of concentric circles. Each winding "
+                             "becomes its own non-circular curve, absorbing "
+                             "eccentricity and a fraction of jitter into "
+                             "the base. Requires --winding-detector raycast.")
+    parser.add_argument("--init-from", type=str, default=None,
+                        help="Track 2: path to a model_final.pt checkpoint "
+                             "to initialize the residual model weights from "
+                             "before training starts. Optimizer state is "
+                             "ignored (fresh Adam). Useful for curriculum "
+                             "(clean → imperfect).")
     parser.add_argument("--gt-npz", type=str, default=None,
                         help="Path to synthetic ground_truth.npz. "
                              "Required when --supervised-steps > 0.")

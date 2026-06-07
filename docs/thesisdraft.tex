@@ -1,0 +1,1482 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{physics}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{bm}
+\usepackage{multirow}
+
+% Math operators
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\abs}[1]{\left| #1 \right|}
+\newcommand{\round}[1]{\left\lfloor #1 \right\rceil}
+\newcommand{\clip}[1]{\text{clip}\!\left(#1\right)}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+
+% Title
+\title{Virtual Unrolling of Historical Movie Film Rolls\\from Synchrotron CT Scans}
+\author{Kaiwen Li}
+\date{May 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Placeholder.
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+% ============================================================================
+% 1. INTRODUCTION
+% ============================================================================
+
+\section{Introduction}
+
+Placeholder.
+
+% ============================================================================
+% 2. PROBLEM STATEMENT
+% ============================================================================
+
+\section{Problem Statement}
+
+\subsection{Physical Setup}
+
+We are given high-resolution synchrotron CT reconstructions of tightly wound historical movie rolls. Each roll is reconstructed as a stack of 2D axial slices (single $x$-$y$ cross-sections), of which roughly two-thirds contain film material; the rest cover packaging and empty scanner regions. Under synchrotron illumination, the dense silver grains of exposed emulsion produce distinctly high X-ray attenuation values, making the photographic content potentially recoverable from the CT data alone.
+
+Each roll is wound in a planar spiral: the film strip lies in the $xy$-plane and is coiled around a central spool axis aligned with $z$. The primary test roll (Mickey) has approximately $N_w \approx 34$ windings with a mean inter-layer spacing of $\approx 22\,\text{px}$, film thickness $\approx 17\,\text{px}$, and thin air gaps between most windings. Additional rolls with different winding counts and geometries will be used to validate the pipeline's generality.
+
+\subsection{Formal Problem Definition}
+
+Let $V \in \R^{H \times W \times Z}$ denote the CT volume with intensity values representing local X-ray attenuation. The emulsion domain $\Omega_{\text{emul}} \subset \R^3$ is the support of the photographic emulsion layer within the volume. Because the emulsion carries image content proportional to its silver-grain density, recovering the original strip amounts to finding a geometric map
+
+\begin{equation}
+    \varphi : \Omega_{\text{emul}} \longrightarrow [0, L] \times [0, H_s]
+    \label{eq:fwd_map}
+\end{equation}
+
+that takes each 3D emulsion voxel to its 2D coordinate $(u, z)$ on the flat strip, where $u \in [0, L]$ is the arc-length coordinate along the strip and $z$ is the axial coordinate (preserved by the unrolling).
+
+Equivalently, we seek the \emph{inverse map}
+
+\begin{equation}
+    f : [0, N_w] \times [0, Z] \longrightarrow \R^2, \qquad f(u, z) = (x, y),
+    \label{eq:inv_map}
+\end{equation}
+
+from strip coordinates $(u, z)$ to in-plane voxel positions $(x, y)$ in each axial slice $z$. Here $u$ is a \emph{normalized arc-length} coordinate, rescaled to the domain $[0, N_w]$ for convenience: $u = N_w \cdot s(\theta)/S_{\max}$, where $s(\theta)$ is the arc length along the spiral from the inner end and $S_{\max}$ is the total arc length (Eq.~\eqref{eq:arc_approx} in Section~\ref{sec:neural}). Because arc length grows \emph{quadratically} with the winding angle---outer windings are longer than inner ones---integer values of $u$ do \textbf{not} coincide with winding boundaries. The winding index $k$ at coordinate $u$ follows the inverse of the quadratic
+\begin{equation}
+    u(k) = N_w \cdot \frac{r_0\,(2\pi k) + \tfrac{1}{2}\,a\,(2\pi k)^2}{S_{\max}},
+    \label{eq:u_of_k}
+\end{equation}
+so e.g.\ on the HQ outer preset ($N_w = 28$, $r_0 \approx 144$\,px, $a \approx 7.6$\,px/rad) the innermost ten windings span only $u \in [0, 4.7]$ (about $17\%$ of the strip), while the outermost winding alone spans $u \in [27.1, 28]$. Equivalently, $u_{\text{norm}} = u/N_w \in [0, 1]$ is the fraction of total film length.
+
+\paragraph{Requirements.} A valid unrolling map $f$ must satisfy:
+\begin{enumerate}
+    \item \textbf{Attachment}: $f(u, z) \in \Omega_{\text{emul}}^{(z)}$ for all $(u, z)$, where $\Omega_{\text{emul}}^{(z)}$ is the emulsion mask at slice $z$.
+    \item \textbf{Injectivity}: distinct strip coordinates map to distinct 3D positions.
+    \item \textbf{Smoothness}: $f$ is continuously differentiable; the reconstructed strip exhibits no tearing or folding.
+    \item \textbf{Low distortion}: local distances and angles are approximately preserved (conformality/isometry).
+\end{enumerate}
+
+\paragraph{Challenges.} Several geometric and signal properties make this problem non-trivial:
+\begin{itemize}
+    \item \textbf{Topological ambiguity}: the emulsion occupies a thin $(\approx 5\,\text{px})$ annular region per winding; the spiral topology is not visible from the binary mask alone.
+    \item \textbf{Pinch points}: adjacent windings touch or nearly touch at isolated locations, creating apparent connections that mislead tracing algorithms.
+    \item \textbf{Non-uniform geometry}: real film tension variation causes radial jitter and elliptical deformation of individual windings.
+    \item \textbf{No ground truth}: on the real roll, the true strip content $S(u, z)$ is unknown; all optimization must be self-supervised.
+\end{itemize}
+
+\subsection{Two-Stage Pipeline}
+
+We decompose the problem into two stages:
+
+\begin{enumerate}
+    \item \textbf{Segmentation}: estimate $\hat{\psi} : V \to \{0, 1, 2\}^{H \times W \times Z}$, a per-voxel label map with classes air (0), film base (1), and emulsion (2). This provides the geometric scaffold $\Omega_{\text{emul}}$.
+    \item \textbf{Unwrapping}: given $\hat{\psi}$, learn $f$ from Eq.~\eqref{eq:inv_map} and render the recovered strip $\hat{S}(u, z) = V\bigl(f(u, z),\, z\bigr)$.
+\end{enumerate}
+
+% ============================================================================
+% 3. DATA
+% ============================================================================
+
+\section{Data}
+
+\subsection{CT Acquisition}
+
+Multiple historical movie rolls are scanned at the synchrotron beamline at PSI using a parallel-beam geometry. Raw data consist of projection images acquired at discrete rotation angles; axial slices are reconstructed via filtered back-projection (FBP). Each reconstructed slice is a single $x$-$y$ cross-section of the roll at one axial position $z$, stored as an HDF5 file (key \texttt{image}, uint16, shape $H \times W$). Groups of 20 consecutive slices are also provided as 3D sub-volumes (key \texttt{volume}).
+
+Currently, the primary roll used in all experiments is referred to as ``Mickey''. It yields approximately 3000 reconstructed slices in total, of which around 2000 contain film material; the remaining slices capture empty scanner space, packaging, and transition regions at the top and bottom of the roll. 
+
+\subsection{Roll Geometry}
+
+Table~\ref{tab:roll_geometry} lists the key geometric parameters for the Mickey roll, extracted from the nnU-Net segmentation using the raycast winding detector described in Section~\ref{sec:raycast}. Parameters will vary across rolls; the values here are specific to Mickey.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Parameter & Symbol & Value \\
+\midrule
+Slice resolution & $H \times W$ & $3063 \times 3062\,\text{px}$ \\
+Total slices (usable) & --- & $\approx 2000$ of $\approx 3000$ \\
+Number of windings & $N_w$ & $34$ (raycast detector) \\
+Inner radius & $r_{\min}$ & $\approx 617\,\text{px}$ \\
+Outer radius & $r_{\max}$ & $\approx 1347\,\text{px}$ \\
+Mean inter-layer spacing & $\Delta r$ & $\approx 22\,\text{px}$ \\
+Film thickness & $t_{\text{film}}$ & $\approx 17\,\text{px}$ \\
+Emulsion thickness & $t_{\text{emul}}$ & $\approx 5\,\text{px}$ \\
+Air gap & $t_{\text{air}}$ & $0$--$5\,\text{px}$ (touching to separated) \\
+\bottomrule
+\end{tabular}
+\caption{Geometric parameters of the Mickey roll estimated from segmentation and raycast winding detection.}
+\label{tab:roll_geometry}
+\end{table}
+
+
+TODO: Add other upcoming scanned rolls.
+
+% ============================================================================
+% 4. METHODOLOGY
+% ============================================================================
+
+\section{Methodology}
+
+\subsection{Segmentation}
+\label{sec:segmentation}
+
+\subsubsection{Task Formulation}
+
+We treat segmentation as a 3-class voxel-level classification problem. Let $\mathcal{X} \subset \R^{H \times W \times D}$ be a 3D sub-volume patch. We seek a classifier $\hat{\psi}_\theta : \mathcal{X} \to \{0,1,2\}^{H \times W \times D}$ minimizing the expected loss
+
+\begin{equation}
+    \mathcal{L}_{\text{seg}} = \mathcal{L}_{\text{CE}} + \mathcal{L}_{\text{Dice}},
+\end{equation}
+
+where the cross-entropy term
+
+\begin{equation}
+    \mathcal{L}_{\text{CE}} = -\frac{1}{N}\sum_{i=1}^{N} \sum_{c=0}^{2} y_{ic}\log p_{ic}
+\end{equation}
+
+and the soft Dice loss per class $c$
+
+\begin{equation}
+    \mathcal{L}_{\text{Dice}} = 1 - \frac{1}{3}\sum_{c=0}^{2} \frac{2\sum_i p_{ic}\,y_{ic}}{\sum_i p_{ic} + \sum_i y_{ic} + \epsilon}
+\end{equation}
+
+are summed; $y_{ic} \in \{0,1\}$ is the one-hot ground truth and $p_{ic}$ the predicted softmax probability.
+
+\subsubsection{Annotation}
+
+Twenty-five 3D NIfTI volumes (Dataset502) were annotated semi-automatically: ilastik probability maps provided initial labels that were manually corrected in 3D Slicer. Each volume spans 20 axial slices. Ground-truth segmentations were reviewed slice-by-slice.
+
+\subsubsection{Models Compared}
+
+We evaluated five model families under a fair comparison protocol: all trained on identical data splits, evaluated on the same 5-volume held-out test set using 5-fold cross-validation where applicable.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Model & Framework & Dice (mean) & Notes \\
+\midrule
+nnU-Net 3D & nnU-Net v2 & \textbf{0.9728} & Full 3D patches, auto-tuned \\
+nnU-Net 2D (matched) & nnU-Net v2 & 0.9717 & Same training time as 3D \\
+UNet3D & MONAI & 0.9447 & 3D residual UNet \\
+SwinUNETR & MONAI & 0.9350 & Swin Transformer backbone \\
+nnU-Net 2D (original) & nnU-Net v2 & 0.7485 & Full training schedule, 2D slices \\
+\bottomrule
+\end{tabular}
+\caption{Segmentation model comparison on Dataset502 (25 volumes, 3-class, mean Dice over classes 1 and 2).}
+\label{tab:seg_results}
+\end{table}
+
+nnU-Net 3D achieves the highest Dice of $0.9728$ and is used as the segmentation backbone for all subsequent unwrapping experiments. The lower performance of the original nnU-Net 2D run ($0.7485$) is attributed to its default longer training schedule causing overfitting at the given dataset size; matched training time (nnU-Net 2D matched, $0.9717$) closes the gap almost entirely. Training configuration details are given in Appendix~\ref{app:seg_training}.
+
+\subsection{Algorithmic Unwrapping Approaches}
+\label{sec:algorithmic}
+
+Prior to the neural approach, we explored three algorithmic strategies to establish baselines and understand the geometric difficulty of the problem.
+
+\subsubsection{Global Archimedean Spiral Fit (v1)}
+
+The simplest model assumes the entire roll follows a single Archimedean spiral $r(\theta) = r_0 + a\theta$. Parameters $(r_0, a, c_x, c_y)$ are fit globally to the emulsion mask via least-squares. Each emulsion pixel is assigned a strip coordinate $u$ by evaluating the spiral arc length to its angle.
+
+This approach is obviously too simplistic for our case and didnt yield usable results.
+
+\subsubsection{Per-Layer Tracing (v2)}
+
+Each winding is traced independently via radial scanning at 1440 angles. At each angle, the emulsion midpoint radii are detected. Layer midpoints at successive angles are linked by greedy nearest-neighbour matching to form closed curves. Each curve provides a local $u$-parameterisation.
+
+\paragraph{Failure mode.} Greedy linking fails at the spiral opening (layers 8--10 of 28), where adjacent windings lie within one layer thickness of each other. Coverage drops to $\approx 85\%$ and winding identity swaps produce cross-contamination in the strip.
+
+\subsubsection{Polar-Space Dewarping (v3)}
+
+The image is resampled in polar coordinates $(r, \theta)$, where each winding becomes a near-horizontal band. Layers are detected independently at each angle via Gaussian-smoothed radial profiles, yielding 100\% coverage and correct winding count. However, numbering discontinuities at the spiral opening cause lateral shifts in the strip that persist across all angles, producing wavy output.
+
+
+\subsubsection{Summary}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Approach & Layers & Coverage & Strip quality & Key issue \\
+\midrule
+v1: Global spiral & 28 & 100\% (wrong) & Sinusoidal & Model too rigid \\
+v2: Per-layer tracing & 22 & $\approx$85\% & Flat (where tracked) & Greedy linker \\
+v3: Polar dewarping & 28 & 100\% & Wavy & Numbering shifts \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of algorithmic unwrapping approaches.}
+\label{tab:algo_compare}
+\end{table}
+
+The consistent failure mode across all three approaches is the absence of a topologically aware winding assignment near the spiral opening. Even with this problem fixed, there would be many further problems, that would make the actual mapping of pixels hard. This motivates the ML based formulation in Section~\ref{sec:neural}.
+
+\subsection{Synthetic CT Data Generation}
+\label{sec:synthetic}
+
+To enable quantitative evaluation of unwrapping algorithms (which is impossible on the real roll without ground truth), we build a differentiable synthetic CT generator that rolls a 2D strip into an Archimedean spiral and renders physically motivated CT intensities. The generator produces datasets format-compatible with the real-data pipeline. A pipeline upgrade (2026-05-18) makes the generated spirals continuous across the $+x$ seam ray; the resulting HQ outer-emulsion presets supersede the legacy inner-emulsion presets as the canonical synthetic benchmark (Section~\ref{sec:hq_outer_presets}). We will from this point on mark tests and corresponding infos with "legacy" to denote the old synthetic dataset (TODO: Maybe just replace with new ones)
+
+\subsubsection{Archimedean Spiral Model}
+
+We model the film as an Archimedean spiral in polar coordinates:
+\begin{equation}
+    r(\theta) = r_0 + a\,\theta, \qquad \theta \in [0,\, 2\pi N_w],
+    \label{eq:archimedean}
+\end{equation}
+where $r_0 = r_{\text{inner}}$ is the innermost winding centerline radius, $a = \Delta r / (2\pi)$ is the radial advance per radian, $\Delta r = t_{\text{film}} + t_{\text{air}}$ is the layer spacing, and $N_w$ is the total winding count.
+
+\subsubsection{Arc-Length Parameterization}
+
+Using angle directly as a strip coordinate would cause non-uniform spatial sampling (inner windings are shorter than outer ones). Instead, we parameterize by arc length. For the spiral in Eq.~\eqref{eq:archimedean} with $dr/d\theta = a$:
+
+\begin{equation}
+    s(\theta) = \int_0^\theta \sqrt{r(\theta')^2 + a^2}\,\mathrm{d}\theta'.
+\end{equation}
+
+Since $a/r_0 \ll 1$ for typical parameters ($r_0 \approx 600\,\text{px}$, $a \approx 3.5\,\text{px/rad}$), we use the approximation
+
+\begin{equation}
+    s(\theta) \approx r_0\,\theta + \tfrac{1}{2}\,a\,\theta^2 + \mathcal{O}\!\left(\bigl(a/r_0\bigr)^3\right),
+    \label{eq:arc_approx}
+\end{equation}
+
+with total arc length $S_{\max} = r_0(2\pi N_w) + \frac{1}{2}a(2\pi N_w)^2$.
+
+The normalized strip coordinate is $u(\theta) = s(\theta)/S_{\max} \in [0,1]$.
+
+\subsubsection{Layer Masks}
+
+For each pixel at Cartesian position $(y, x)$, polar coordinates relative to center $(c_y, c_x)$ are:
+\begin{align}
+    r &= \sqrt{(y-c_y)^2 + (x-c_x)^2}, \\
+    \theta &= \operatorname{atan2}(y - c_y,\, x - c_x) \bmod 2\pi.
+\end{align}
+
+The continuous winding index is $k_{\text{cont}} = (r - r_0 - a\theta)/\Delta r$, giving discrete assignment $k = \round{k_{\text{cont}}}$. The signed radial displacement from the winding centerline is
+\begin{equation}
+    \delta r = r - \bigl(r_0 + a(\theta + 2\pi k)\bigr).
+\end{equation}
+
+With half-thickness $h = t_{\text{film}}/2$ and emulsion fraction $\alpha_{\text{emul}} = t_{\text{emul}}/t_{\text{film}}$:
+
+\begin{align}
+    \text{on\_film} &= \bigl(|\delta r| \leq h\bigr) \wedge (0 \leq k < N_w), \\
+    \text{on\_emulsion}_{\text{inner}} &= \text{on\_film} \wedge \bigl(-h \leq \delta r < {-h + t_{\text{emul}}}\bigr), \\
+    \text{on\_emulsion}_{\text{outer}} &= \text{on\_film} \wedge \bigl(h - t_{\text{emul}} < \delta r \leq h\bigr).
+\end{align}
+
+\subsubsection{CT Intensity Model}
+
+We model pixel intensities according to simplified CT absorption physics, mapping material class to linear attenuation coefficient $\mu$:
+\begin{equation}
+    I(y,x) = \begin{cases}
+        I_{\text{bg}} = 0.02 & \text{(air)} \\
+        I_{\text{base}} = 0.12 & \text{(film base)} \\
+        I_{\text{base}} + s_{\text{val}}(y,x)\,(I_{\max} - I_{\text{base}}) & \text{(emulsion)}
+    \end{cases}
+    \label{eq:ct_intensity}
+\end{equation}
+
+where $I_{\max} = 0.85$ is the attenuation of fully exposed emulsion (maximum silver-grain density) and $s_{\text{val}}(y,x) \in [0,1]$ is the strip content sampled via bilinear interpolation:
+\begin{equation}
+    s_{\text{val}}(y,x) = \mathcal{B}\bigl(S_z,\; u(\theta_{\text{total}})\cdot (W_s - 1)\bigr),
+\end{equation}
+with $\theta_{\text{total}} = \theta + 2\pi k$ and $W_s$ the strip width in pixels. Gaussian noise $\mathcal{N}(0, \sigma_n^2)$ is optionally added and clipped to $[0,1]$.
+
+\subsubsection{Geometric Imperfections}
+
+Real film rolls deviate from perfect Archimedean geometry. We model two perturbation types.
+
+\paragraph{Eccentricity.} An off-center spool shifts the effective spiral center sinusoidally:
+\begin{equation}
+    r_{\text{eff}} = r + e\cos(\theta - \pi/4),
+\end{equation}
+where $e$ is the eccentricity magnitude in pixels. The winding assignment uses $r_{\text{eff}}$ in place of $r$.
+
+\paragraph{Radial jitter.} Film tension variation produces per-winding radial deviations. We implement two spectra:
+\begin{itemize}
+    \item \textit{Sinusoidal}: $\Delta r_{\text{jitter}}(k,\theta) = \sum_{j=1}^{3} A_{kj}\sin(j\theta + \phi_{kj})$ with per-winding random amplitudes and phases.
+    \item \textit{$1/f$ spectral}: $\text{jitter}[k,i] = \mathcal{F}^{-1}\!\bigl\{\xi_k(f)/\sqrt{f}\bigr\}$, where $\xi_k(f)$ is complex Gaussian noise with DC suppressed. The result is peak-normalised to amplitude $A = $ \texttt{radial\_jitter} to prevent winding assignment corruption (peaks must satisfy $A \ll \Delta r / 2$).
+\end{itemize}
+
+The full corrected centerline is:
+\begin{equation}
+    r_{\text{center}}(k,\theta) = r_0 + a(\theta + 2\pi k) + e\cos(\theta - \pi/4) + \Delta r_{\text{jitter}}(k,\theta).
+\end{equation}
+
+\paragraph{Continuous-seam jitter (2026-05-18 upgrade).} The legacy implementation indexed jitter by the discrete winding $k$, which jumps from $k$ to $k+1$ at the $+x$ ray ($\theta = 0$). Even though $\theta_{\text{total}} = \theta + 2\pi k$ is continuous across that ray, evaluating $\Delta r_{\text{jitter}}(k, \theta)$ with the legacy $(k, \theta)$ pair gave a discontinuous radial offset at the seam: adjacent windings could differ by up to the full jitter amplitude (5--10\,px) at the same $\theta_{\text{total}}$. This produced a visible radial ``cut'' along the $+x$ ray in all imperfect presets, biased the segmentation against the inner windings near the seam, and made it harder for the unwrapping model to recognize the surface as a single continuous strip. We now index the jitter directly by $\theta_{\text{total}}$ for the sinusoidal case, and generate a single $1/f$ noise sequence over the full $\theta_{\text{total}} \in [0, 2\pi N_w]$ range for the spectral case. The resulting centerline is $C^0$-continuous across the seam by construction. Existing presets that pre-date this change remain reproducible because the discrete-index branch is retained for the no-jitter case.
+
+\subsubsection{Segmentation Imperfections}
+
+To mimic nnU-Net residual errors ($\approx 3\%$ Dice gap), we inject:
+\begin{itemize}
+    \item \textit{Mislabelling}: per-pixel random swaps between classes 1 and 2 at rate $p_{\text{mislabel}}$.
+    \item \textit{Pinch points}: $N_{\text{pinch}}$ random radial bridges connecting adjacent windings, simulating the sub-pixel connections present in real CT segmentation.
+\end{itemize}
+
+\subsubsection{Ground Truth}
+
+For each emulsion pixel, we store the exact arc-length coordinate
+\begin{equation}
+    u_{\text{map}}(y,x) = \begin{cases} u(\theta_{\text{total}}) & \text{if on emulsion} \\ \text{NaN} & \text{otherwise.} \end{cases}
+\end{equation}
+
+This constitutes the ground truth unwrapping field used for quantitative evaluation.
+
+\subsubsection{Presets}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lccccccl}
+\toprule
+Preset & Size & $N_w$ & Film/Gap & $\sigma_n$ & $e$ & Jitter & Content \\
+\midrule
+\texttt{quick\_test} & 512 & 15 & 12/4 & 0 & 0 & 0 & Procedural \\
+\texttt{clean\_4k} & 4096 & 28 & 36/12 & 0 & 0 & 0 & Procedural \\
+\texttt{imperfect\_4k} & 4096 & 28 & 36/12 & 0.03 & 10 & 5 & Procedural \\
+\texttt{video\_4k} & 4096 & 28 & 36/12 & 0 & 0 & 0 & Video \\
+\texttt{video\_4k\_imperfect} & 4096 & 28 & 36/12 & 0.03 & 10 & 5 & Video \\
+\texttt{mickey\_geometry} & 3063 & 34 & 17/5 & 0.02 & 8 & 4 & Video \\
+\texttt{mickey\_geometry\_v2} & 3063 & 34 & 17/5 & 0.02 & 8 & 4 & Video+1/f \\
+\bottomrule
+\end{tabular}
+\caption{Legacy synthetic presets (inner emulsion, discrete-$k$ jitter). Size is the image dimension; jitter values are peak amplitudes in pixels. The \texttt{mickey\_geometry} preset replicates real Mickey geometry (34 windings, $r_{\min}=617\,\text{px}$).}
+\label{tab:presets}
+\end{table}
+
+\subsubsection{HQ Outer-Emulsion Presets (canonical benchmark)}
+\label{sec:hq_outer_presets}
+
+Four HQ presets generated using the upgraded pipeline (Section~\ref{sec:synthetic}) form the canonical synthetic benchmark for all subsequent unwrapping experiments. Each is rendered at $4096{\times}4096$ image resolution with $Z=256$ z-slices, $N_w=28$ windings, outer-emulsion convention, and continuous-seam jitter. The strip content is Big Buck Bunny 1080p re-sampled at 4:3 frame aspect ($\sim$455\,frames over the unrolled length, $\sim$11 frames per winding). Total unrolled strip length is $143{,}558$ pixels.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcccll}
+\toprule
+Preset & $\sigma_n$ & $e$ & Jitter & Jitter spectrum & Segmentation noise \\
+\midrule
+\texttt{hq\_video\_4k\_outer}            & 0    & 0  & 0  & ---        & --- \\
+\texttt{hq\_video\_4k\_outer\_imperfect} & 0.03 & 10 & 5  & sinusoidal & --- \\
+\texttt{hq\_video\_4k\_outer\_realistic} & 0.02 & 8  & 4  & $1/f$      & pinch=8 + coherent$^*$ \\
+\texttt{hq\_video\_4k\_outer\_harsh}     & 0.08 & 30 & 12 & sinusoidal & --- \\
+\bottomrule
+\end{tabular}
+\caption{HQ outer-emulsion presets (256-slice, BBB video content, continuous-seam jitter). $^*$\texttt{realistic} adds spatially-coherent segmentation perturbations matching real nnU-Net residual error: boundary wobble $\pm 1.5$\,px, content-driven thickening 2\,px, $3\%$ air clipping at the film edge.}
+\label{tab:hq_outer_presets}
+\end{table}
+
+The two clean and one mildly-imperfect HQ presets (\texttt{hq\_video\_4k\_outer} and \texttt{hq\_video\_4k\_outer\_imperfect}) are used as the canonical pair against which all unwrapping models are evaluated (Section~\ref{sec:hq_baseline}); the \texttt{realistic} preset is reserved for the synthetic-to-real transfer evaluation, and \texttt{harsh} is a stress test outside the standard benchmark.
+
+\subsection{Neural Inverse Mapping for Unwrapping}
+\label{sec:neural}
+
+\subsubsection{Formulation}
+
+We parameterize the inverse map (Eq.~\eqref{eq:inv_map}) by a neural network
+
+\begin{equation}
+    f_\theta : [0, N_w] \times [0, Z] \to \R^2, \qquad (u, z) \mapsto (x, y),
+\end{equation}
+
+trained to minimize geometric self-supervised losses derived from the segmentation mask. Rather than learning $f_\theta$ from scratch, we decompose it as
+
+\begin{equation}
+    f_\theta(u, z) = \bm{p}_{\text{base}}(u) + \bm{r}_\theta(u, z),
+    \label{eq:residual}
+\end{equation}
+
+where $\bm{p}_{\text{base}}(u) \in \R^2$ is a closed-form \emph{analytical base} computed from the detected winding geometry, and $\bm{r}_\theta(u, z) \in \R^2$ is a small \emph{residual correction} learned by the network. This decomposition is the key architectural choice: the analytical base handles the large-scale spiral geometry so the network only needs to correct small perturbations.
+
+\subsubsection{Winding Boundary Detection}
+\label{sec:raycast}
+
+To construct the analytical base, we must detect the boundary radii $\{R_k\}_{k=0}^{N_w}$ separating successive windings. We use a \emph{raycast detector}:
+
+\begin{enumerate}
+    \item Cast $N_\phi = 720$ radial rays from the estimated spool center.
+    \item Along ray at angle $\phi_i$, identify all contiguous emulsion runs (connected sequences of emulsion-labeled pixels). Let $\rho_{k,i}$ denote the median radius of the $k$-th run on ray $i$.
+    \item Estimate $N_w$ as the mode of run counts across rays.
+    \item For each winding $k$, compute the boundary radius $R_k = \operatorname{median}_i \rho_{k,i}$.
+\end{enumerate}
+
+This approach is robust to pinch points (which affect only isolated rays and are suppressed by the median) and to touching windings (runs are counted by emulsion connectivity, not by air gaps). On the real Mickey roll, this detector recovers $N_w = 34$ windings with 76\% per-ray agreement, compared to 26 windings from a na\"ive radial histogram approach that fails at the spiral seam.
+
+The spool center $(c_x, c_y)$ is estimated by fitting a circle to the inner winding's emulsion midpoints.
+
+\subsubsection{Analytical Base}
+
+The analytical base maps the normalized arc-length coordinate $u \in [0, N_w]$ to a 2D position in the image plane. It is a true Archimedean inverse: rather than indexing by winding, it inverts the arc-length relation of Eq.~\eqref{eq:arc_approx} to recover the spiral angle, then evaluates the spiral. The spiral parameters $(r_0, a, S_{\max})$ are derived once from the raycast winding boundaries $\{b_0, \ldots, b_{N_w}\}$: the layer spacing is the mean interior boundary gap $\ell = (b_{N_w-1} - b_1)/(N_w - 2)$, the inner centerline radius is $r_0 = b_1 - \ell/2$, the radial advance is $a = \ell/(2\pi)$, and $S_{\max} = r_0\theta_{\max} + \tfrac12 a\theta_{\max}^2$ with $\theta_{\max} = 2\pi N_w$.
+
+\paragraph{Arc-length inversion.} Given $u$, let $u_{\text{norm}} = u/N_w \in [0,1]$. The continuous spiral angle $\theta_{\text{total}}$ is the non-negative root of the arc-length quadratic $\tfrac12 a\,\theta_{\text{total}}^2 + r_0\,\theta_{\text{total}} - u_{\text{norm}} S_{\max} = 0$:
+\begin{equation}
+    \theta_{\text{total}}(u) = \frac{\sqrt{r_0^2 + 2 a\, u_{\text{norm}} S_{\max}} - r_0}{a}.
+    \label{eq:arc_inverse}
+\end{equation}
+This is the exact inverse of Eq.~\eqref{eq:arc_approx} and is continuous across the seam by construction (no per-winding indexing).
+
+\paragraph{Radius and angle.} The Archimedean centerline radius and the in-plane angle follow directly from $\theta_{\text{total}}$:
+\begin{equation}
+    r_{\text{base}}(u) = r_0 + a\,\theta_{\text{total}}(u),
+    \qquad
+    \theta_{\text{base}}(u) = \theta_{\text{total}}(u) + \theta_{\text{seam}},
+    \label{eq:r_theta_base}
+\end{equation}
+where $\theta_{\text{seam}}$ is the spiral opening angle, detected as the ray with fewest emulsion-run transitions. The boundary radii $\{b_k\}$ thus enter the base only through the fitted scalars $(r_0, a)$; the base is a single smooth Archimedean arm, not a piecewise interpolation between detected windings. (A piecewise per-winding / per-angle variant exists in the code under \texttt{data\_driven\_base}, used by the Round~9 Track~1 experiment, but it was not adopted---see Appendix~\ref{app:full_ablation}---and all reported results use the Archimedean inversion above.)
+
+\paragraph{Emulsion offset.} The above gives the film \emph{centerline}. To snap to the emulsion sublayer, we apply a radial offset:
+\begin{equation}
+    r_{\text{emul}}(u) = r_{\text{base}}(u) + \delta_{\text{emul}},
+    \qquad
+    \delta_{\text{emul}} = \begin{cases}
+        -(h_{\text{film}} - h_{\text{emul}}) & \text{inner emulsion side} \\
+        \phantom{-}(h_{\text{film}} - h_{\text{emul}}) & \text{outer emulsion side}
+    \end{cases}
+\end{equation}
+where $h_{\text{film}} = t_{\text{film}}/2$ and $h_{\text{emul}} = t_{\text{emul}}/2$.
+
+\paragraph{Cartesian conversion.}
+\begin{equation}
+    \bm{p}_{\text{base}}(u) = \begin{pmatrix} c_x + r_{\text{emul}}(u)\cos\theta_{\text{base}}(u) \\ c_y + r_{\text{emul}}(u)\sin\theta_{\text{base}}(u) \end{pmatrix}.
+    \label{eq:pbase}
+\end{equation}
+
+Coordinates are normalised to $[-1,1]^2$ before being passed to the network. This emulsion offset is a critical design choice: without it, the residual network must learn an $O(t_{\text{film}})$ direction-varying radial correction from a binary mask signal, which proved impossible in early experiments (row correlation $\approx 0.04$). Baking the offset into the base reduces the residual's task to small geometric perturbations only.
+
+\subsubsection{Residual INR Architecture}
+
+The residual $\bm{r}_\theta$ is parameterized by a Fourier-feature MLP:
+
+\paragraph{Random Fourier features.} Input $(u, z)$ is encoded via random Fourier features \cite{rahimi2007random} to lift the input into a high-dimensional feature space amenable to learning high-frequency functions:
+\begin{equation}
+    \gamma(u, z) = \Bigl[\cos(2\pi\bm{B}\bm{x}),\; \sin(2\pi\bm{B}\bm{x})\Bigr] \in \R^{2m},
+\end{equation}
+where $\bm{x} = (u/N_w, z/Z)^T \in [-1,1]^2$, $\bm{B} \in \R^{m \times 2}$ with $B_{ij} \sim \mathcal{N}(0, \sigma^2)$, $m = 256$ features per axis, and bandwidth $\sigma = 20$. The bandwidth must satisfy $\sigma \gtrsim N_w / 2$ to represent $N_w \approx 28$--$34$ cycles over $[-1,1]$; $\sigma = 10$ was insufficient for $N_w = 28$.
+
+\paragraph{MLP.} The encoded features pass through a 4-layer ReLU MLP with hidden dimension 256 and a skip connection at layer 2:
+\begin{equation}
+    \bm{h}_0 = \text{ReLU}(\bm{W}_0 \gamma + \bm{b}_0), \quad
+    \bm{h}_\ell = \text{ReLU}(\bm{W}_\ell \bm{h}_{\ell-1} + \bm{b}_\ell), \quad
+    \bm{h}_2 = \text{ReLU}(\bm{W}_2 [\bm{h}_1; \gamma] + \bm{b}_2),
+\end{equation}
+\begin{equation}
+    \bm{r}_\theta(u,z) = \bm{W}_{\text{out}} \bm{h}_3.
+\end{equation}
+The output head $\bm{W}_{\text{out}}$ is zero-initialised, ensuring $\bm{r}_\theta \equiv \bm{0}$ at step 0 and $f_\theta(u, z) = \bm{p}_{\text{base}}(u)$. The network has $\approx 460\text{K}$ parameters.
+
+\subsubsection{Self-Supervised Training Losses}
+
+Training is entirely self-supervised: no ground-truth strip content is required. We define three losses. Achieving good performance here is the current main goal, as in real rolls we dont have GT.
+
+\paragraph{Attachment loss.} The predicted position must lie on the emulsion. Let $\mathrm{DT}: \R^2 \to [0,1]$ be the normalized signed distance transform of the emulsion mask (value 1.0 on emulsion, decreasing to 0 with distance). Then:
+\begin{equation}
+    \mathcal{L}_{\text{att}} = \E_{u,z}\bigl[\bigl(1 - \mathrm{DT}(f_\theta(u,z))\bigr)^2\bigr].
+    \label{eq:loss_att}
+\end{equation}
+This is differentiable via bilinear sampling of the precomputed distance-transform volume using \texttt{F.grid\_sample} with a $(1,1,Z,H,W)$ tensor, giving $O(1)$ memory regardless of batch size.
+
+\paragraph{Conformal loss.} The map should be locally angle-preserving (conformal). Let
+\begin{equation}
+    E = \Bigl\|\frac{\partial f_\theta}{\partial u}\Bigr\|^2, \quad
+    F = \Bigl\langle\frac{\partial f_\theta}{\partial u}, \frac{\partial f_\theta}{\partial z}\Bigr\rangle, \quad
+    G = \Bigl\|\frac{\partial f_\theta}{\partial z}\Bigr\|^2
+\end{equation}
+be the coefficients of the first fundamental form. Conformality requires $E = G$ and $F = 0$:
+\begin{equation}
+    \mathcal{L}_{\text{conf}} = \E_{u,z}\bigl[(E - G)^2 + 4F^2\bigr].
+    \label{eq:loss_conf}
+\end{equation}
+Gradients are computed via automatic differentiation through $f_\theta$.
+
+\paragraph{Combined objective.} The total training loss is:
+\begin{equation}
+    \mathcal{L} = w_{\text{att}}\,\mathcal{L}_{\text{att}} + w_{\text{conf}}(t)\,\mathcal{L}_{\text{conf}},
+    \label{eq:total_loss}
+\end{equation}
+where $w_{\text{conf}}(t) = w_{\text{conf}}^{\max} \cdot \min(1, t / t_{\text{ramp}})$ ramps the conformal weight over the first $t_{\text{ramp}}$ steps, allowing attachment to dominate early training. Default: $w_{\text{att}} = 1.0$, $w_{\text{conf}}^{\max} = 0.1$, $t_{\text{ramp}} = 2000$.
+
+\subsubsection{Synthetic-Supervised Pretraining}
+
+For real-data transfer-learning cases, we try to generate a synthetic roll that imitates the real dataset:
+
+\begin{enumerate}
+    \item Generate the \texttt{mickey\_geometry} synthetic preset with 34 windings, $r_{\min} = 617$, and mild eccentricity/jitter to match real Mickey geometry.
+    \item Train supervised on the ground-truth $u$-map: replace Eq.~\eqref{eq:total_loss} with
+        \begin{equation}
+            \mathcal{L}_{\text{sup}} = \E_{u,z}\bigl[\norm{f_\theta(u,z) - f^*(u,z)}^2\bigr],
+        \end{equation}
+        where $f^*(u,z)$ maps each strip coordinate to its known 2D ground-truth position.
+    \item Fine-tune the pretrained weights on real Mickey using purely self-supervised losses (Eq.~\eqref{eq:total_loss}).
+\end{enumerate}
+
+\subsubsection{Role of the Segmentation in the Unwrapping Pipeline}
+\label{sec:seg_role}
+
+The 3-class segmentation $\hat\psi$ produced by nnU-Net 3D (Section~\ref{sec:segmentation}) is the only source of geometric information available to the unwrapping stage; no CT-intensity processing happens before segmentation enters the pipeline. The segmentation is used in four distinct ways during training, and is reused at inference time for the same geometric structure. We do not fine-tune the segmentation during unwrapping training (Section~\ref{sec:results_synth}).
+
+\paragraph{(i) Reference-slice geometry detection.} A single mid-stack reference slice $\hat\psi_z$ with $z = Z/2$ feeds three one-off detectors that are evaluated once at dataset construction and frozen for the rest of training:
+\begin{itemize}
+    \item \emph{Spool centre} $(c_y, c_x)$ — computed by \texttt{find\_spool\_center} from the binary film mask of the reference slice.
+    \item \emph{Winding boundaries} $\{b_0, \ldots, b_{N_w}\}$ and per-angle centerline radii $\{r_k(\theta_i)\}$ — produced by the raycast detector (Section~\ref{sec:raycast}) operating on the same reference slice. The boundaries set the analytical base's per-winding radial layout; the per-angle table is stored for downstream use (Phase 3, Z1).
+    \item \emph{Seam angle} $\theta_{\text{seam}}$ — angle at which the spiral is open, detected by counting film$\to$air transitions per radial ray on the reference slice.
+\end{itemize}
+These three numbers (centre, boundaries, seam) together fully determine the analytical base $\bm{p}_{\text{base}}(u)$ in Eq.~\eqref{eq:analytical_base} and are reused at every $(u, z)$ query for the lifetime of the model.
+
+\paragraph{(ii) Attachment mask.} A 3D binary volume $M(y, x, z)$ is built from the full 3D segmentation stack, with one of three policies:
+\begin{itemize}
+    \item \texttt{film}: $M = (\hat\psi > 0)$ — the union of film base and emulsion.
+    \item \texttt{emulsion}: $M = (\hat\psi = 2)$ — emulsion only (default in all HQ runs).
+    \item \texttt{centerline}: emulsion mask, eroded by a small number of iterations to keep only the central 1--2~px band; per-slice fallback to plain emulsion if erosion empties the mask.
+\end{itemize}
+This mask is the geometric definition of $\Omega_{\text{emul}}$ used by the attachment loss (Eq.~\eqref{eq:loss_att}). It is stored as a GPU tensor in $(1, 1, Z, H, W)$ layout so it can be queried at arbitrary $(x, y, z)$ via 3D \texttt{F.grid\_sample}; the bilinear sampling provides a soft, differentiable membership value rather than a hard 0/1.
+
+\paragraph{(iii) Distance-transform volume.} A signed distance transform is computed per slice from $M$ and clipped to $\mathrm{dist\_scale} = 50$\,px:
+\begin{equation}
+    \mathrm{DT}(y, x, z) = \min\bigl(\,\mathrm{EDT}(\neg M_z)(y, x)\,/\,\mathrm{dist\_scale},\,1.0\bigr),
+\end{equation}
+where $\mathrm{EDT}$ is the Euclidean distance transform. This produces a smooth $[0, 1]$ field with value $0$ on the attachment target and value $1$ saturated $50$\,px away. The attachment loss in Eq.~\eqref{eq:loss_att} samples this field via the same 3D \texttt{grid\_sample}; using $\mathrm{DT}$ instead of a hard $(1 - M)^2$ supplies a non-zero gradient well off the mask, which is essential for the thin \texttt{emulsion} and \texttt{centerline} targets.
+
+\paragraph{(iv) Intensity-volume gating (eval / auxiliary losses only).} The same segmentation that builds $M$ also defines which pixels contribute to several diagnostic and auxiliary losses tested in Section~\ref{sec:post_baseline}: the mask-gated frame-period loss (A1 v2), the mask-gated intensity z-coherence (Z2), and the joint autodecoder render loss (A3) all weight their per-sample contribution by $M$ evaluated at $\mathrm{pred}_{xy}$. In each case the mask gradient is detached so the auxiliary loss cannot push the surface off the emulsion to escape the constraint.
+
+\paragraph{Supervised mode.} When the supervised loss is enabled (synthetic only), the ground-truth segmentation is used in place of $\hat\psi$ to construct $M$ and $\mathrm{DT}$, and the GT $u$-map provides per-pixel angular labels. These are auxiliary to the supervised MSE: the supervised loss itself uses pixel-level $(u, z) \to (x, y)$ correspondences from the generator, not the segmentation.
+
+\subsubsection{Inference: Strip Rendering from a Trained Model}
+\label{sec:inference}
+
+At inference (\texttt{surface\_eval.py}) the same dataset object is reconstructed from the same segmentation as in training (re-running the reference-slice detectors to recover identical $c_y, c_x, \{b_k\}, \theta_{\text{seam}}$), the model checkpoint is loaded, and a strip is rendered by querying the model on a dense regular grid:
+
+\begin{enumerate}
+    \item \emph{Build the $(u, z)$ grid.} Choose strip width $W_{\text{strip}} = N_w \cdot \mathrm{ppw}$ where $\mathrm{ppw}$ is the pixels-per-winding setting (default $1440$, $256$ in smokes). $u$ values are sampled uniformly on $[0, N_w)$ via \texttt{torch.linspace}, $z$ values are integer slice indices on $[0, Z)$. Both are converted to the normalised $[-1, 1]^2$ inputs the INR expects.
+    \item \emph{Predict positions.} For each grid point, evaluate $f_\theta(u, z) = \bm{p}_{\text{base}}(u) + \bm{r}_\theta(u, z)$. The analytical base $\bm{p}_{\text{base}}$ is recomputed from the stored boundaries / seam at every query, not cached; the residual $\bm{r}_\theta$ is one forward pass through the trained MLP. Inference is chunked at $2^{18}$ samples to fit GPU memory.
+    \item \emph{Sample CT intensity.} For each predicted position $(x, y, z)$, bilinear-sample the raw CT volume via 3D \texttt{grid\_sample}; the result is the strip pixel value at $(u, z)$. This is the same \texttt{sample\_image} call used by the auxiliary losses during training, just executed densely over the eval grid.
+    \item \emph{Optional Jacobian diagnostics.} If \texttt{also\_maps=True} (default in eval), per-grid-point partial derivatives of $\bm{r}_\theta$ with respect to $(u, z)$ are computed by autograd, used to build the $E, G, F$ diagnostic images and a residual-magnitude map.
+\end{enumerate}
+
+The strip output is a 2D image of shape $(Z, W_{\text{strip}})$ in raw CT-intensity units (16-bit float in $[0, 1]$ after the generator's normalisation). For comparison to the GT source strip (also $[0, 1]$ but in strip-content units, not CT intensity) the eval inverts the generator's intensity model
+\begin{equation}
+    \hat{S}_{\text{content}}(u, z) = \mathrm{clip}\Bigl(\frac{\hat{S}_{\text{intensity}}(u, z) - I_{\text{base}}}{I_{\max} - I_{\text{base}}},\; 0,\; 1\Bigr),
+    \label{eq:intensity_inversion}
+\end{equation}
+with $I_{\text{base}}, I_{\max}$ read from \texttt{ground\_truth.npz}; this is the strip that row\_corr, SSIM, and PSNR are computed on.
+
+Note that inference uses \emph{no segmentation information for the per-sample query} once the dataset is constructed: the INR is queried at $(u, z)$ alone, the analytical base is parametrised by the once-detected geometry, and the CT volume is sampled directly. The segmentation only re-enters via the optional auxiliary losses, which are not run at inference. On real rolls, where ground-truth is unavailable, the same render pipeline is used; only the GT-comparison step is skipped, and the unsupervised proxies of Section~\ref{sec:metrics} (z\_coh, hf\_energy, dyn\_range) replace row\_corr / SSIM.
+
+\subsubsection{Training Details}
+
+\begin{itemize}
+    \item \textbf{Optimizer}: Adam, $\beta_1 = 0.9$, $\beta_2 = 0.999$.
+    \item \textbf{Learning rate}: $\eta = 10^{-4}$, cosine decay to $10^{-6}$ over all steps. (LR $= 10^{-3}$ caused instability in pure-SS mode.)
+    \item \textbf{Batch size}: $B = 2048$ random $(u, z)$ samples per step.
+    \item \textbf{Steps}: 1500 (smoke/ablation), 10000 (full runs).
+    \item \textbf{Hardware}: NVIDIA A100 80\,GB. Typical training: $\approx 3\,\text{min}$ (smoke), $\approx 20\,\text{min}$ (full).
+    \item \textbf{Volume}: 20 axial slices per run to keep memory bounded on the $3063 \times 3062$ resolution.
+\end{itemize}
+
+% ============================================================================
+% 5. EVALUATION METRICS
+% ============================================================================
+
+\section{Evaluation Metrics}
+\label{sec:metrics}
+
+\subsection{Supervised Metrics (Synthetic Only)}
+
+\paragraph{Strip row correlation.}
+The primary metric for synthetic experiments. Given a predicted strip $\hat{S}$ and ground-truth strip $S^*$, both of shape $(Z, W_s)$:
+\begin{equation}
+    \text{row\_corr} = \frac{1}{Z}\sum_{z=1}^{Z} \text{Pearson}\bigl(\hat{S}[z,:],\; S^*[z,:]\bigr).
+    \label{eq:row_corr}
+\end{equation}
+A value of 1.0 indicates perfect per-row alignment; random alignment gives $\approx 0$.
+
+The predicted strip is obtained by evaluating $V(f_\theta(u, z), z)$ on a dense $u$-grid via bilinear interpolation.
+
+\paragraph{Median horizontal shift.}
+\begin{equation}
+    \delta_{\text{shift}} = \operatorname{median}_z \argmax_\delta \bigl[\hat{S}[z,:] \star S^*[z,:]\bigr](\delta),
+\end{equation}
+where $\star$ denotes cross-correlation. A non-zero shift indicates a global seam-angle misalignment; it is subtracted when reporting row\_corr.
+
+\paragraph{$u$-map RMSE.}
+\begin{equation}
+    \text{RMSE}_u = \sqrt{\frac{1}{|\Omega_{\text{emul}}|}\sum_{(y,x) \in \Omega_{\text{emul}}} \bigl(\hat{u}(y,x) - u_{\text{map}}(y,x)\bigr)^2\,}.
+\end{equation}
+
+\subsection{Unsupervised Metrics (Real Rolls)}
+
+Since the true strip content of a real roll is unknown, we define four proxy metrics derived from the rendered strip alone:
+
+\begin{align}
+    \text{z\_coh} &= \frac{1}{Z-1}\sum_{z=1}^{Z-1} \text{Pearson}(\hat{S}[z,:],\, \hat{S}[z+1,:]),\label{eq:zcoh}\\
+    \text{hf\_energy} &= \frac{\sum_{|f| > f_{75}} |\mathcal{F}\{\hat{S}[z,:]\}|^2}{\sum_f |\mathcal{F}\{\hat{S}[z,:]\}|^2},\label{eq:hf}\\
+    \text{dyn\_range} &= P_{95}(\hat{S}) - P_5(\hat{S}),\\
+    \text{row\_var} &= \frac{1}{Z}\sum_z \operatorname{Var}_u(\hat{S}[z,:]),
+\end{align}
+where $f_{75}$ is the 75th-percentile frequency bin. A collapsed map (all $(u,z) \to$ same patch) gives $\text{z\_coh} \approx 1$, $\text{hf\_energy} \approx 0$, $\text{dyn\_range} \approx 0$. The calibration on synthetic (Table~\ref{tab:score_calib}) relates these proxies to known row\_corr values. These metrics are mainly used during training (early stopping if collapse detected), and currently we analyze through visual inspection.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+Condition & row\_corr & z\_coh & hf\_energy & dyn\_range & Notes \\
+\midrule
+Synthetic clean (R1n) & 0.865 & 0.87 & 0.144 & 0.61 & Target region \\
+Synthetic imperfect (R1n) & 0.548 & 0.81 & 0.144 & 0.52 & SS ceiling \\
+Collapsed (cold-SS on real roll) & --- & 0.998 & 0.002 & 0.20 & Failure mode \\
+\bottomrule
+\end{tabular}
+\caption{Calibration of unsupervised strip-score metrics against known row\_corr values on synthetic data, and the observed failure-mode values on a real roll.}
+\label{tab:score_calib}
+\end{table}
+
+% ============================================================================
+% 6. EXPERIMENTS AND RESULTS
+% ============================================================================
+
+\section{Experiments and Results}
+
+\subsection{Segmentation}
+
+nnU-Net 3D with default hyperparameters achieves mean Dice 0.9728 on the held-out test set (Table~\ref{tab:seg_results}), outperforming the next-best model (nnU-Net 2D matched, 0.9717) by a narrow margin. The large gap for nnU-Net 2D (original) vs.\ nnU-Net 2D (matched) confirms that the 2D architecture is not inherently worse, but its default longer schedule overfits at this dataset size.
+
+All subsequent unwrapping experiments use segmentation produced by nnU-Net 3D. We do not fine-tune the segmentation model during unwrapping.
+
+\subsection{Synthetic Unwrapping Ablation}
+\label{sec:results_synth}
+
+\subsubsection{Clean Geometry (Procedural)}
+
+Starting from the clean preset (\texttt{clean\_4k}, no eccentricity or jitter), the pure self-supervised configuration R1n (mask attachment + conformal, $\eta = 10^{-4}$) achieves row\_corr $= 0.865$ after 10\,000 steps. The two decisive design choices that unlocked this from an initial ceiling of $\approx 0.04$:
+
+\begin{enumerate}
+    \item \textbf{Emulsion offset in the analytical base} (Section~\ref{sec:neural}). Without this, the base sits on the film centerline; the residual must learn a per-winding $\approx 15\,\text{px}$ direction-varying correction from a binary mask—a structurally underdetermined problem.
+    \item \textbf{Low learning rate} ($\eta = 10^{-4}$ vs.\ $10^{-3}$). At $\eta = 10^{-3}$, the early self-supervised gradient kicked the residual into a basin the conformal loss could not escape.
+\end{enumerate}
+
+\subsubsection{Imperfect Geometry (Procedural)}
+
+TODO: better naming convention:
+
+On \texttt{imperfect\_4k} (eccentricity $e=10$, sinusoidal jitter $A=5$\,px), the pure-SS R1n achieves row\_corr $= 0.548$, revealing a self-supervised ceiling not present on the clean case. Table~\ref{tab:ablation_imperfect} summarises systematic attempts to exceed this ceiling.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lllcc}
+\toprule
+Round & Variant & Mechanism & row\_corr & Notes \\
+\midrule
+Baseline & R1n & SS only & 0.548 & ceiling \\
+Baseline & R1S & Supervised & 0.825 & architecture cap \\
+\midrule
+R2 & R1o--R1q & Learnable eccentricity & 0.548 & no gain \\
+R2 & R1r & Larger INR (512-dim, 6L) & 0.551 & capacity not bottleneck \\
+\midrule
+R3 & R1s--R1t & $z$-coherence TV loss & 0.548 & no gain \\
+\midrule
+R4 & R1B1--R1B6 & Radial intensity / intensity z-coh & 0.414--0.533 & worse or equal \\
+\midrule
+R6 & R1P\_S & Per-winding parametric (sup) & 0.210 & C$^0$ discontinuity \\
+R6 & R1C1--R1C3 & Strip-quality loss & 0.140--0.220 & surface scatters \\
+\midrule
+R7 & R1D3 (full) & Warm-start + discriminator & 0.355 & Goodhart collapse \\
+\midrule
+R9/T4 & R1PF1ws & Warm-start + DCT patch-feature & \textbf{0.800} & synth only \\
+R9/T5 & R1S & Supervised (\texttt{mickey\_geometry}) & 0.897 & prior for transfer \\
+\bottomrule
+\end{tabular}
+\caption{Ablation on \texttt{imperfect\_4k} (or \texttt{video\_4k\_imperfect} for R9/T4--T5). See Appendix~\ref{app:full_ablation} for complete tables.}
+\label{tab:ablation_imperfect}
+\end{table}
+
+The 0.55 self-supervised ceiling is structural: the 5\,px sinusoidal jitter creates $O(N_w)$ near-degenerate surfaces satisfying mask attachment equally, and the conformal loss cannot distinguish them. The following paragraphs discuss each class of attempted fix and its specific failure mode.
+
+\paragraph{Learnable eccentricity (R1o--R1q).} Adding learnable parameters $(A, \phi)$ for $r_{\text{eff}} = r + A\cos(\theta - \phi)$ did not move the eccentricity amplitude away from zero. The reason is that the SS loss gradient w.r.t.\ $A$ is nearly zero once the surface already lies on the emulsion: the binary mask provides no signal to distinguish the correct eccentricity value from zero. A more promising direction would be to estimate eccentricity \emph{directly from the segmentation} before training—for example, fitting $A\cos(\theta-\phi)$ to the per-winding centroid offsets from the raycast detector—and baking the result into the analytical base as a fixed constant rather than a learned parameter.
+
+\paragraph{Larger model (R1r).} Doubling the hidden dimension (256 → 512) and adding two extra layers did not improve performance. This confirms that the bottleneck is in the loss signal, not the model's capacity to represent high-frequency deformations. Increasing model size is not a useful direction until a more informative loss is available.
+
+\paragraph{$z$-coherence TV (R1s/t).} The penalty on $\partial f_\theta / \partial z$ had no effect because the synthetic geometry is z-invariant by construction—the model naturally learns a z-invariant solution, and the penalty adds no new constraint. On real data, where spool drift produces genuine z-variation, this loss could provide a useful smoothness prior on top of a well-initialized model, but this was not tested in that setting. NOTE: could be usefule in real runs in the future
+
+\paragraph{Radial intensity (R1B1--R1B3).} The idea was to use the local CT intensity profile to pin the surface to the emulsion peak. In practice, the analytical base already places the surface at the local intensity peak from step 0, so the gradient of the intensity loss is near-zero at initialization. The loss can only push the surface \emph{away} from a peak, which is why higher weights degraded performance. A potential improvement would be to compare full radial intensity \emph{profiles} (sampling at several offsets from the predicted position) rather than the single-point value; this would provide a gradient signal that distinguishes the correct peak from an adjacent winding's peak even when both are local maxima.
+
+\paragraph{Intensity z-coherence (R1B4--R1B5).} Requiring consistent intensities at the same $u$ across adjacent slices collapsed the surface to uniform-intensity regions of the film base, where intensity is trivially constant. This collapse mode is not addressable by weight tuning alone: any weight large enough to be informative is large enough to drive the surface off the emulsion. The R1B6 combination (radial + z-coherence) avoids collapse but provides no improvement over the radial-only baseline, suggesting the two losses cancel each other's gradients.
+
+\paragraph{Per-winding parametric model (R1P\_S).} The supervised result of 0.21 (vs.\ INR's 0.825) is explained by C$^0$ discontinuities at integer winding boundaries: each winding's Fourier series fits its own training samples perfectly but produces jumps at $u = k, k+1, \ldots$, which are visible as sharp colour transitions in the rendered strip. The principled fix is to replace the per-winding indicator basis with a B-spline basis that enforces C$^1$ continuity at knot boundaries. This was the motivation for Track 3, but B-splines performed even worse (0.62) due to the local-support problem described below.
+
+\paragraph{B-spline model (Track 3).} Cubic B-splines have C$^1$ continuity and should avoid the per-winding discontinuity issue. The worse result (0.62 vs.\ 0.91 for the INR) is explained by \emph{local support}: each control point only influences a window of $\approx 4$ knot spans, which means (a) inner windings have few training samples and their control points are under-constrained, and (b) the per-winding deformation pattern (same sinusoidal family at different phases) cannot be amortized—the B-spline must relearn it independently in each local region. The INR's global Fourier features generalize across all windings from day one. A hybrid model—global INR handling the shared deformation pattern, lightweight per-winding B-spline correction for local deviations—could in principle combine both advantages. not implemented/tested.
+
+\paragraph{Strip-quality losses (R1C1--R1C3).} Maximizing strip variance and high-frequency content (to prevent collapse) failed because these objectives are satisfied by \emph{spatially scattered} predictions that sample random bright and dark regions, producing high variance without any spatial coherence. The underlying issue is that an aggregate statistic over the whole strip cannot distinguish a coherent, correctly-unwrapped strip from a randomly-sampled one with similar statistics. A constraint that pairs specific $u$-positions with their expected image contennt would be needed to overcome this.
+
+\paragraph{CNN discriminator (R1D3, full runs).} Full-length runs collapsed because the discriminator, once frozen, becomes a fixed proxy that the surface model can exploit: given enough optimization steps, it finds positions whose rendered patches score high under the fixed CNN without corresponding to the correct unwrapping. The key observation from the checkpoint trajectory is that the peak performance (0.822) is achieved at the end of supervised training \emph{before} the discriminator loss is activated; the discriminator then drives the model away from this peak within 500 steps. A potential stabilization: periodically update the discriminator to reflect the current surface model's output distribution (adversarial co-training). This is significantly more complex but would remove the frozen-proxy problem.
+
+Current only promising results that genuinely provided new information was the DCT patch-feature loss (R9/T4), which checks whether patches at the same $u$ across adjacent $z$ are structurally consistent—but this requires a supervised anchor to prevent trivial collapse. Still more testing needed here
+
+\subsubsection{Video Content}
+
+Replacing procedural test patterns with real video frames (Buffalo Dance, 1894) in the \texttt{video\_4k} and \texttt{video\_4k\_imperfect} presets (surprisingly) significantly improves performance:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Preset & R1n (SS) & R1S (supervised) \\
+\midrule
+\texttt{clean\_4k} & 0.865 & --- \\
+\texttt{imperfect\_4k} & 0.548 & 0.825 \\
+\texttt{video\_4k} & \textbf{0.955} & --- \\
+\texttt{video\_4k\_imperfect} & \textbf{0.636} & \textbf{0.914} \\
+\midrule
+\texttt{mickey\_geometry} & 0.546 & 0.897 \\
+\bottomrule
+\end{tabular}
+\caption{row\_corr across presets and training modes.}
+\label{tab:preset_comparison}
+\end{table}
+
+Richer frame-edge texture in video content provides stronger gradient signal through bilinear sampling, raising both supervised and SS performance. This indicates the procedural ceiling of 0.548 is a worst-case artefact; real content is expected to perform closer to the video case.
+
+The DCT patch-feature loss (R9/T4, warm-start + fixed feature extractor) achieves row\_corr $= 0.800$ on \texttt{video\_4k\_imperfect}, the first SS-augmenting loss to break the 0.55 ceiling. However, it requires a supervised warm-start as an anchor and collapses on real roll data (all $(u,z)$ map to one bright patch) because no ground-truth anchor is available.
+
+\subsection{Real-Roll Transfer (Mickey)}
+
+\subsubsection{Cold-Start Collapse}
+
+Cold-start pure-SS on the Mickey roll (no prior) collapses: z\_coh $= 0.998$ (strip is nearly constant), hf\_energy $= 0.002$, dyn\_range $= 0.20$. The self-supervised losses have no information to distinguish spiral winding $k$ from winding $k+1$ if they share the same intensity distribution—which they do at nnU-Net accuracy.
+
+\subsubsection{Synthetic-Prior Transfer (R1T5)}
+
+Initializing from the \texttt{mickey\_geometry} supervised checkpoint breaks the collapse:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Variant & z\_coh & hf\_energy & dyn\_range & res\_px \\
+\midrule
+Cold-start SS (collapsed) & 0.998 & 0.002 & 0.20 & --- \\
+\textbf{R1T5 (synth prior)} & \textbf{0.760} & 0.0017 & \textbf{0.243} & 30 \\
+Synth clean target & 0.87 & 0.144 & 0.61 & --- \\
+\bottomrule
+\end{tabular}
+\caption{Strip-score metrics on Mickey after real-roll fine-tuning. R1T5 is the first non-collapsed result on this roll.}
+\label{tab:real_results}
+\end{table}
+
+The initialization residual of 5\,px (vs.\ $\approx 300\,\text{px}$ cold-start) confirms the synthetic prior encodes the correct geometric structure. Training loss plateaus at step $\approx 300$; 10\,000-step full runs do not improve beyond the 1500-step smoke, confirming the plateau is structural.
+
+The gap (z\_coh 0.76 vs.\ 0.87 target; hf\_energy 0.0017 vs.\ 0.144 target) indicates the strip is geometrically coherent but content-blurry: per-frame angular alignment information is not available from mask attachment and conformal losses alone.
+
+\subsubsection{Strengthened Synthetic Prior}
+
+We tested a more realistic synthetic prior (\texttt{mickey\_geometry\_v2}: 1/f jitter, pinch points, mislabelling). The fine-tuned real-roll metrics were within noise of the v1-prior results (z\_coh: 0.776 vs.\ 0.760; hf: 0.0016 vs.\ 0.0017). This rules out sim-to-real distribution mismatch on jitter spectrum and segmentation noise as the limiting factor; the ceiling is determined by the SS loss family itself.
+
+\subsection{HQ Outer-Emulsion Baseline (256-slice, 2026-05-20)}
+\label{sec:hq_baseline}
+
+The accumulated experiments above span several lower-resolution presets and intermediate code revisions, making direct comparison difficult. To establish a single, reproducible reference point against which all subsequent experiments are compared, we re-ran the two un-refuted recipes—\textbf{R1n} (pure self-supervised: distance-transformed emulsion attachment + conformal loss ramped over 2000 steps, $\eta = 10^{-4}$) and \textbf{R1S} (the supervised upper bound: identical model and schedule with MSE-on-GT replacing the self-supervised loss)—from scratch on the two HQ outer-emulsion presets (\texttt{hq\_video\_4k\_outer} and \texttt{hq\_video\_4k\_outer\_imperfect}). Both presets use the upgraded continuous-seam-jitter pipeline with the emulsion depth profile (Section~\ref{sec:hq_outer_presets}); the imperfect preset adds eccentricity $e = 10$ and sinusoidal jitter amplitude $5$\,px. Each model trained for $10{,}000$ steps on an A100 80\,GB GPU at batch size $2^{17}$.
+
+Raycast winding detection recovered all $28/28$ windings on every run.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llcccc}
+\toprule
+Preset & Variant & row\_corr & PSNR (dB) & RMSE & median shift (px) \\
+\midrule
+\texttt{hq\_video\_4k\_outer} (clean)        & R1S (sup) & \textbf{0.9823} & 25.91 & 0.0507 & 0 \\
+\texttt{hq\_video\_4k\_outer} (clean)        & R1n (SS)  & 0.9787 & 25.27 & 0.0545 & 0 \\
+\texttt{hq\_video\_4k\_outer\_imperfect}     & R1S (sup) & \textbf{0.9570} & 19.45 & 0.1066 & 0 \\
+\texttt{hq\_video\_4k\_outer\_imperfect}     & R1n (SS)  & 0.8530 & 16.16 & 0.1555 & 3 \\
+\bottomrule
+\end{tabular}
+\caption{HQ outer-emulsion baseline, fresh 10\,000-step training. R1S is the architecture's supervised upper bound; R1n is the strongest pure self-supervised recipe. The SS-vs-supervised gap is negligible on the clean preset ($0.0036$) and widens to $0.104$ row\_corr on the imperfect preset, consistent with the structural diagnosis that the SS losses are underdetermined under per-winding jitter. PSNR is reported with peak~$=1.0$ on the $[0,1]$-normalised strip.}
+\label{tab:hq_baseline}
+\end{table}
+
+Figures~\ref{fig:3panel_clean} and~\ref{fig:3panel_imperfect} show side-by-side comparisons of the ground-truth source strip, the \emph{oracle} reconstruction (sampling the synthetic CT volume directly at the GT $u$-map; the irreducible reconstruction floor due to CT noise and binning), and our R1n self-supervised reconstruction. The oracle is not exact either: on the imperfect preset it still carries visible binning artefacts from per-column emulsion-pixel averaging, but it has no geometric error by construction. Comparing the oracle against R1n therefore isolates geometric/model error from CT-rendering error.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{figures/3panel_outer_frame.png}\\[2pt]
+\includegraphics[width=\linewidth]{figures/3panel_outer_window.png}
+\caption{HQ clean preset (\texttt{hq\_video\_4k\_outer}). Single best-content frame (top, $\sim 256{\times}341$\,px per panel) and two-frame window (bottom). Left: GT source strip. Centre: oracle (CT sampled at GT $u$-map). Right: our self-supervised R1n reconstruction (row\_corr $0.978$). On the clean preset the R1n result is visually indistinguishable from the oracle.}
+\label{fig:3panel_clean}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{figures/3panel_outer_imperfect_frame.png}\\[2pt]
+\includegraphics[width=\linewidth]{figures/3panel_outer_imperfect_window.png}
+\caption{HQ imperfect preset (\texttt{hq\_video\_4k\_outer\_imperfect}, eccentricity $10$, jitter $5$\,px). Single best-content frame (top) and two-frame window (bottom). The oracle still carries CT-noise + binning artefacts but no geometric error; the R1n panel (row\_corr $0.853$) additionally exhibits subtle per-winding misalignment and content blur from the residual not fully absorbing the jitter.}
+\label{fig:3panel_imperfect}
+\end{figure}
+
+\paragraph{The oracle strip: construction and irreducible loss.}
+\label{para:oracle}
+The third panel in Figures~\ref{fig:3panel_clean} and~\ref{fig:3panel_imperfect} (centre) is the \emph{oracle} reconstruction: the strip one would obtain knowing the ground-truth $u$-map exactly. It is the upper bound on what \emph{any} learned mapping (whether SS, supervised, or perfectly hand-crafted) can recover by sampling the synthetic CT volume, and is therefore the right comparison target for visual-quality questions. It is constructed by \texttt{unwrapping/inr/render\_oracle\_strip.py} as follows:
+
+\begin{enumerate}
+    \item Read the GT segmentation $\hat\psi^*$ and GT $u$-map $u^*(y, x) \in [0, 1)$ from \texttt{ground\_truth.npz}. Select the set of emulsion pixels $\mathcal{E} = \{(y, x) : \hat\psi^*(y, x) = 2 \land \mathrm{finite}(u^*(y, x))\}$.
+    \item Discretise each emulsion pixel's $u^*$ to an integer strip column: $c(y, x) = \lfloor u^*(y, x) \cdot W_{\text{strip}} \rfloor$, with $W_{\text{strip}}$ the target strip width (143\,558\,px in the HQ outer presets).
+    \item For every axial slice $z$, accumulate per-column sums and counts:
+    \begin{align}
+        s(c, z) &= \sum_{(y, x) \in \mathcal{E},\, c(y, x) = c} V(y, x, z), \\
+        n(c) &= \bigl|\{(y, x) \in \mathcal{E} : c(y, x) = c\}\bigr|,
+    \end{align}
+    and emit the oracle strip pixel $S_{\text{oracle}}(c, z) = s(c, z) / \max(n(c), 1)$. Columns with $n(c) = 0$ are filled by 1-D nearest-neighbour interpolation along $u$.
+\end{enumerate}
+
+The oracle therefore has no geometric or learned-model error: each strip column receives contributions only from emulsion pixels whose true $u$ falls in that column. On the clean preset it reaches SSIM $0.978$ against the GT source strip; on the HQ outer\_imperfect preset it reaches $0.854$. Three mechanisms account for the gap:
+
+\begin{enumerate}
+    \item \textbf{Continuous-to-discrete $u$ binning.} The GT $u$-map is continuous in $[0, 1)$; the oracle discretises it to $W_{\text{strip}}$ columns. Two pixels with $u^*$ differing by $\Delta u < 1/W_{\text{strip}}$ land in the same column and are averaged. With $W_{\text{strip}} = 143{,}558$ and total spiral arc $\approx W_{\text{strip}}$ pixels, this is sub-pixel quantisation but still a true information loss.
+    \item \textbf{Forward bilinear render in the generator.} The synthetic CT volume is built by painting the GT source strip onto the emulsion via bilinear interpolation: each emulsion pixel's CT intensity is a weighted sum of up to four GT strip pixels. This is a low-pass filter that removes content above the Nyquist frequency of the per-emulsion-pixel sampling grid. The oracle inverts the spiral mapping but cannot invert the bilinear filter; the high-frequency content is gone before the oracle even reads $V$. With the flat-slab emulsion model (Section~\ref{sec:synthetic}), the several emulsion pixels averaged per column across the $\approx 6$\,px radial band all carry the same silver density for a given strip content, so the per-column mean is unbiased and this bilinear low-pass is the dominant clean-preset loss term. (Earlier versions of the generator applied an emulsion depth-falloff profile, under which the within-band pixels carried different silver densities; that depth-averaging was then the dominant loss term and depressed the clean floor to SSIM $0.87$. Removing the profile lifts the clean oracle to $0.978$.)
+    \item \textbf{CT noise.} The generator adds Gaussian intensity noise $\mathcal{N}(0, \sigma_n^2)$ to $V$. The per-column averaging in step 3 reduces the noise floor by $\sqrt{n(c)}$ but does not eliminate it; on noisy presets (\texttt{imperfect}, \texttt{realistic}, \texttt{harsh}) the residual noise visibly contributes to the oracle's SSIM gap.
+\end{enumerate}
+
+Three secondary effects appear on the \texttt{imperfect}-and-above presets and explain the additional $\approx 0.12$ SSIM drop from clean ($0.978$) to imperfect ($0.854$):
+
+\begin{enumerate}
+    \setcounter{enumi}{3}
+    \item \textbf{Non-uniform arc density under jitter.} Per-winding radial jitter changes the local arc length differential along $u$, so the number of emulsion pixels per strip column $n(c)$ varies across windings even at the same target $u$. Columns with few contributing pixels are noisier (smaller $\sqrt{n}$ noise reduction); columns with many are smoother. The result is a per-winding pattern of effective resolution that the GT source strip does not have.
+    \item \textbf{Eccentricity-induced sampling asymmetry.} On eccentric windings, the four CT pixels closest to the bilinear-rendered point are no longer symmetric about the true emulsion centerline, so the forward render's bilinear filter is asymmetric in $u$. This biases the oracle's reconstruction in a winding-dependent way.
+    \item \textbf{Inter-winding overlap.} On imperfect presets, jitter occasionally brings adjacent emulsion bands within their combined radial extent ($\sim 12$\,px). The pixels in the overlap region carry CT intensities that were painted from two GT $u$-values; the oracle reads them as one and assigns the whole contribution to whichever $u^*$ the generator stored. This produces local cross-talk visible as winding-to-winding bleed-through in the imperfect oracle.
+\end{enumerate}
+
+Effects (1)--(3) are present in the clean preset and bound the oracle there at SSIM $0.978$; effects (4)--(6) add roughly another $0.12$ on the imperfect preset. None of these are addressable by changes to the unwrapping model — they are properties of the synthetic CT rendering itself. They define the irreducible floor against which the mapping pipeline should be compared, and any visual-quality work targeting the model alone has SSIM $0.854$ as its asymptote on the imperfect preset, not $1.0$. (Trained-model SSIM values reported elsewhere in this chapter --- the R1S/R1n strips and the Phase-5 three-way diagnostic --- were obtained on the earlier depth-profile generator and predate this floor re-measurement; they require re-running on the regenerated flat-slab datasets before being compared against the updated floor.)
+
+\paragraph{Baseline policy.} \textbf{All future unwrapping experiments are compared against the four numbers in Table~\ref{tab:hq_baseline}}, not against the per-round legacy numbers earlier in this chapter. The legacy table (Section~\ref{sec:best_results}) is retained as a record of the experimental trajectory; only Table~\ref{tab:hq_baseline} is the canonical baseline. Any new self-supervised loss, architecture variant, or transfer recipe is to be re-evaluated on these two presets with the same recipe, scheduler, and step budget.
+
+\subsection{Beyond the HQ Baseline: Post-Baseline Self-Supervised Experiments}
+\label{sec:post_baseline}
+
+Using Table~\ref{tab:hq_baseline} as the reference, we ran four further rounds of self-supervised experiments on \texttt{hq\_video\_4k\_outer\_imperfect} aimed at reducing the $0.104$ row\_corr gap between SS and supervised on the imperfect preset. Each round targeted a different structural feature of the loss landscape; all experiments use the same R1n recipe (distance-transformed emulsion attachment + conformal loss, $\eta = 10^{-4}$, $\sigma = 20$ Fourier features, $\texttt{pixels\_per\_winding} = 256$ for smoke evaluations). The smoke control under this configuration is row\_corr $\approx 0.829$; the residual deficit relative to the full-resolution baseline ($0.853$) is attributable to the lower eval resolution and is consistent across all variants. We therefore compare each variant to the $0.829$ smoke control rather than to the $0.853$ full-eval number.
+
+\subsubsection{Phase 1: Analytical-Base Parametrization (A4)}
+\label{sec:phase1_a4}
+
+The HQ baseline shows a non-zero median horizontal shift of $3$\,px on the imperfect preset that is absent on the clean preset and absent in the supervised result. This suggests a residual global angular phase error that the INR is slow to absorb through its $\sigma = 20$ Fourier features. We added a per-winding learnable angular phase $\theta_{\mathrm{offset}}[k]$, $k = 0, \ldots, N_w - 1$ (linearly interpolated in $u$), to the analytical base:
+\begin{equation}
+\theta(u) = \theta_{\mathrm{total}}(u) + \theta_{\mathrm{seam}} + \mathrm{interp}\bigl(u,\, \theta_{\mathrm{offset}}\bigr).
+\end{equation}
+With a weak $L_2$ prior on $\theta_{\mathrm{offset}}$ (weight $10^{-4}$), the parameters drifted to $|\theta|_{\mathrm{mean}} = 0.076\,\mathrm{rad}$ ($\approx 110$\,px shift at the outermost winding); under a strong prior (weight $1.0$) they were pinned near zero ($|\theta|_{\mathrm{mean}} = 3\times 10^{-4}\,\mathrm{rad}$). The strong-prior run achieved row\_corr $= 0.829$, matching the smoke control. The two regimes bracket the gradient available to $\theta_{\mathrm{offset}}$ under pure SS: attachment is rotation-invariant about the spool center, so it provides no direct signal on global rotation; the conformal loss is computed on the INR residual rather than on $\mathrm{pred\_xy}$, so $\theta_{\mathrm{offset}}$ does not appear in the conformal Jacobian. Without an additional symmetry-breaking signal, A4 in isolation does not move the optimum.
+
+\subsubsection{Phase 2: Frame-Period Periodicity Loss (A1)}
+\label{sec:phase2_a1}
+
+The strip is approximately periodic at frame pitch $\Delta u_f \approx 0.0665$ (one frame width $\approx 341$\,px in a strip of width $143{,}558$\,px over $28$ windings). The implied strip $I(u, z) = V\bigl(f(u, z), z\bigr)$ should therefore satisfy $I(u, z) \approx I(u + \Delta u_f, z)$ in feature space. We sampled patches at $(u, z)$ and $(u + \Delta u_f, z)$, computed mid-frequency DCT features per patch (16 coefficients, DC dropped), and penalised cosine distance plus an $L_2$ magnitude floor (target $0.05$) to avoid the constant-content collapse.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{llcc}
+\toprule
+Variant & Mask-weighting & row\_corr & Comment \\
+\midrule
+P2\_A1 v1 & off, $w = 1.0$ & 0.099 & off-emulsion drift (\texttt{attach}: $0 \to 0.08$, $\mathrm{res\_px}: 10 \to 87$) \\
+P2\_A1 v2 & on, $w = 1.0$  & 0.585 & on-manifold; row\_corr drops $0.244$ vs.\ control \\
+\bottomrule
+\end{tabular}
+\caption{Frame-period periodicity loss (A1) on \texttt{hq\_video\_4k\_outer\_imperfect}, 2000-step smoke. v1 collapsed to a uniform off-emulsion region (concentric film-base bands repeat radially and satisfy periodicity trivially). v2 gates each patch's contribution by $\mathrm{sample\_mask}(\mathrm{pred\_xy})$ (detached), which keeps the surface on the emulsion but does not eliminate the drift in row\_corr.}
+\label{tab:phase2_a1}
+\end{table}
+
+The mask-weighting fix prevents the off-emulsion collapse: $\mathrm{attach}$ stays at baseline, $\mathrm{res\_px} \approx 9.5$. The remaining $0.244$ drop in row\_corr is consistent with the loss admitting multiple equally low-loss configurations within the on-emulsion manifold: a mapping that is shifted by a few frames in $u$, or that misaligns winding by winding, can still be periodic at $\Delta u_f$ in feature space without aligning with the true frame boundaries. Cosine similarity on DCT features measures \emph{whether the patch at $u$ and the patch at $u + \Delta u_f$ look alike in feature space}, which is necessary but not sufficient for $\mathrm{pred}\_xy$ to coincide with the true frame structure.
+
+\subsubsection{Phase 3: Three Targeted Probes (Z1, Z2, Z3)}
+\label{sec:phase3_zxx}
+
+\paragraph{Z1 — soft per-angle centerline supervision.} The raycast winding detector stores, in addition to the boundaries used by the analytical base, the per-(winding, angle) emulsion centerline radii on a reference slice. We turned these into soft pseudo-labels: for each $(k, i)$ pair the centerline gives $(x, y)$, and a matching $u = \mathrm{arc}(2\pi k + 2\pi i / n_{\mathrm{rays}}) / L \cdot N_w$ from the same Archimedean arc-length formula used by the analytical base. The loss is a low-weight MSE between $\mathrm{pred}\_xy$ and the centerline label (weight $0.1$).
+
+The result was neutral: row\_corr $= 0.825$ vs.\ control $0.829$. The per-angle table from the raycast detector is, by construction, the same source the analytical base reads when \texttt{data\_driven\_base} is on; using it as a soft target therefore reinforces what the base already supplies rather than adding new information. A version using morphological skeletonisation of the per-slice emulsion mask (rather than the reference-slice raycast table) was scoped but not implemented in this round; it would provide per-slice angular labels capturing $z$-varying local deformation that the reference-slice table cannot encode.
+
+\paragraph{Z2 — mask-weighted intensity z-coherence.} The closed R1B4/R1B5 intensity z-coherence loss (Section~\ref{sec:results_synth}) collapsed to uniform film-base regions because it provides no on-emulsion incentive. Using the same mask-gating as A1 v2 ($M_a \cdot M_b$, detached), we re-tested the same constraint $I(u, z) \approx I(u, z + 1)$. The mask-weighted version stayed on the emulsion (\texttt{attach} $\approx 0$, $\mathrm{res\_px} \approx 10$) but the resulting row\_corr was $0.574$. Two adjacent windings at the same $\theta$ have nearby but distinct content in the strip; a mapping that consistently samples the wrong winding at the same $\theta$ across $z$ is z-coherent for the wrong reason. The mask-weighting fixes the collapse mode of R1B4/R1B5 but does not select between competing on-manifold solutions.
+
+\paragraph{Z3 — supervised label-noise diagnostic.} To bound the noise tolerance of any pseudo-supervision approach, we re-ran R1S with Gaussian noise $\sigma = 5$\,px added to the GT label positions every step. The HQ-baseline supervised row\_corr drops from $0.957$ to $0.601$ (Table~\ref{tab:phase3_z3}). For comparison the layer spacing on the HQ outer presets is $\approx 50$\,px, so $5$\,px noise is $\sim 10\%$ of layer spacing.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+Label noise & row\_corr & shift (px) \\
+\midrule
+$0$\,px (R1S clean GT)  & 0.957 & 0 \\
+$5$\,px Gaussian        & 0.601 & 0 \\
+\bottomrule
+\end{tabular}
+\caption{R1S supervised baseline on \texttt{hq\_video\_4k\_outer\_imperfect} with Gaussian noise added to GT labels every step. Smoke length, 2000 steps.}
+\label{tab:phase3_z3}
+\end{table}
+
+This is a quantitative bound on pseudo-supervision: even labels accurate to a fraction of the layer spacing degrade the supervised path substantially. Approaches that derive labels from segmentation-derived signals — centerlines, skeletons, or distance-transform anchors — typically carry several-px noise from segmentation discretisation alone, which limits how strongly such labels can be weighted before they begin to hurt rather than help. Z1's neutral result and Z3's noise sensitivity are consistent with each other: Z1's labels lay close enough to the analytical base that the loss carried no new information, and any approach using noisier independent labels at a comparable weight would face this noise budget.
+
+\subsubsection{Phase 4: Joint Autodecoder (A3) and Variants}
+\label{sec:phase4_a3}
+
+The losses tried in Phases 1--3 all evaluate at $\mathrm{pred}\_xy$ against properties of either the segmentation, the analytical base, or the CT volume. To force the mapping to \emph{explain} the actual CT intensities rather than merely sit on the emulsion, we co-learn a strip-content INR $g_\varphi(u, z) \to s \in [0, 1]$ alongside $f_\theta$:
+\begin{equation}
+\hat I(u, z) = I_{\mathrm{base}} + s\bigl(g_\varphi(u, z)\bigr)\cdot (I_{\max} - I_{\mathrm{base}}),
+\qquad
+\mathcal{L}_{\mathrm{render}} = M(u, z)\,\bigl(\hat I(u, z) - V(f_\theta(u, z), z)\bigr)^2,
+\end{equation}
+with the same intensity model used by the synthetic generator ($I_{\mathrm{base}} = 0.12$, $I_{\max} = 0.85$). The strip INR uses a smaller backbone ($128$ hidden, $2$ layers, $\sigma = 20$ Fourier; $\approx 50$k parameters). $g_\varphi$ is zero-initialised so $s(\cdot) = 0.5$ at step $0$ (constant grey strip); $\mathcal{L}_{\mathrm{render}}$ is mask-gated and ramped from $0$ to $w = 1.0$ between steps $500$ and $1500$ to let $f_\theta$ first reach the on-emulsion manifold before the render loss adds pressure.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+Variant & Configuration & row\_corr \\
+\midrule
+P4\_A3        & strip-INR, $w_{\mathrm{render}} = 1.0$, ramp $500 \to 1500$ & 0.740 \\
+P4\_A3 + B3   & + radial cap on residual ($|r_{\mathrm{pred}} - r_{\mathrm{base}}| \le \tfrac{1}{2}$ layer spacing) & 0.713 \\
+P4\_A3 + tiny & strip-INR shrunk to $\approx 5$k parameters & 0.620 \\
+P4\_A3 + Z1   & + soft per-angle centerline pseudo-supervision, $w = 0.1$ & 0.735 \\
+\bottomrule
+\end{tabular}
+\caption{Joint autodecoder (A3) and three anti-degeneracy variants on \texttt{hq\_video\_4k\_outer\_imperfect}, $3000$-step smoke. Compare against $0.829$ smoke control.}
+\label{tab:phase4_a3}
+\end{table}
+
+A3 trained cleanly in all four configurations (attachment stayed at baseline, conformal grew an order of magnitude but stabilised, $\mathrm{res\_px}$ remained $\approx 10$). The render loss decreased monotonically; both networks reached a joint fixed point. In each case the joint $(f_\theta, g_\varphi)$ pair settled on a configuration that explains the CT intensities at the model's $\mathrm{pred}\_xy$, but at a $\mathrm{pred}\_xy$ that does not match the GT $u$-map: $g_\varphi$ has enough capacity to model many strip shapes, and any mapping that lands on the emulsion produces \emph{some} target signal $\hat I$ for $g_\varphi$ to fit. The three variants targeted three specific anti-degeneracy mechanisms:
+\begin{itemize}
+\item The radial cap restricts how far $f_\theta$ can deviate from the analytical base; it narrowed the residual range but did not change the qualitative outcome.
+\item The capacity-limited strip ($\approx 5$k parameters) cannot fit arbitrary strip shapes, but at this capacity it also cannot fit the \emph{true} strip well enough to leave room for $f_\theta$ to settle anywhere helpful; the result was the worst of the four.
+\item The soft Z1 anchor is, per the Z3 diagnostic, too noisy to bind hard at low weight; the result was neutral relative to A3 alone.
+\end{itemize}
+
+\subsubsection{Pattern Across Phases 1--4}
+\label{sec:post_baseline_pattern}
+
+Table~\ref{tab:post_baseline_summary} consolidates the eight variants. Within this experimental scope, no configuration produced an improvement over the $0.829$ smoke control or the $0.853$ full-resolution baseline.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+Phase & Best variant & row\_corr \\
+\midrule
+Smoke control (R1n, $\texttt{pixels\_per\_winding} = 256$) & --- & 0.829 \\
+1 (A4 \(\theta_{\mathrm{offset}}\)) & strong prior & 0.829 \\
+2 (A1 periodicity) & mask-weighted & 0.585 \\
+3 (Z1 centerline soft sup) & --- & 0.825 \\
+3 (Z2 masked intensity z-coh) & --- & 0.574 \\
+3 (Z3 sup + $5$\,px label noise) & diagnostic & 0.601\,(vs R1S 0.957) \\
+4 (A3 autodecoder) & baseline & 0.740 \\
+4 (A3 anti-degeneracy variants) & A3+Z1 anchor & 0.735 \\
+\bottomrule
+\end{tabular}
+\caption{Summary of post-baseline self-supervised experiments on \texttt{hq\_video\_4k\_outer\_imperfect}. All training smokes are $2000$--$3000$ steps; the smoke control uses $\texttt{pixels\_per\_winding} = 256$ in eval (vs.\ the full $1440$ in the Table~\ref{tab:hq_baseline} baseline), which costs $\approx 0.024$ in row\_corr.}
+\label{tab:post_baseline_summary}
+\end{table}
+
+A consistent pattern emerges across the eight variants. Pure-SS attachment $+$ conformal define a set of mappings that are smooth, on-emulsion, and locally angle-preserving; the correct mapping (the GT $u$-map) is one element of this set. Each post-baseline loss tested in Phases 1--4 is a function of either $(\mathrm{pred}\_xy)$ or $(\mathrm{pred}\_xy, V_{\mathrm{CT}})$, or of $(\mathrm{pred}\_xy, V_{\mathrm{CT}}, g_\varphi)$ in the joint case. Each one, in our experiments, admitted at least one element of the smooth-on-emulsion set other than the GT mapping that satisfied the loss equally well or better. The auxiliary loss therefore did not, by itself, select between members of the set in favour of the GT mapping.
+
+This is consistent with the Phase 3 Z3 finding that the supervised path itself is brittle to label noise: the GT $u$-map is densely informative at every pixel, and any approach that approximates it (whether from segmentation-derived pseudo-labels or from co-learned signals like A3) trades part of that density for noise, which the loss cannot fully compensate for without an additional source of per-pixel angular information.
+
+These observations are limited to the configurations and step budgets tested here. We do not claim that no further variant of these loss families can succeed --- only that within the experimental envelope of $2000$--$3000$ step smokes on \texttt{hq\_video\_4k\_outer\_imperfect}, the tested losses did not exceed the R1n baseline.
+
+\subsection{Phase 5: Visual Quality on R1S --- Architecture, Rendering, Loss Target}
+\label{sec:phase5_visual_quality}
+
+The Phase~1--4 experiments left both R1S (supervised) and R1n (self-supervised) producing strips that, at HQ resolution, look like low-resolution renderings of the GT video frames: scene content recognisable, but fine texture and edge sharpness lost. To diagnose this we measured SSIM in addition to row\_corr. On \texttt{hq\_video\_4k\_outer\_imperfect} the Fourier R1S baseline scored SSIM $0.500$ against the GT strip; the \emph{oracle} (the CT volume sampled at the GT $u$-map, i.e.\ the irreducible CT-rendering floor) scored SSIM $0.756$. The R1S--vs--Oracle SSIM was $0.501$, equidistant to R1S--vs--GT, indicating multi-pixel mapping error rather than sub-pixel error~\cite{wang2004ssim}.
+
+Phase~5 reframes the question from ``can we improve R1n'' to ``can we improve R1S visual quality.'' We systematically tested levers across three families: input encoding / architecture, rendering-side sampling, and loss target. All experiments use the G1 grid encoder or the canonical $\sigma=20$ Fourier baseline; preset \texttt{hq\_video\_4k\_outer\_imperfect}.
+
+\subsubsection{Architecture Swap: Dense Multi-Resolution 2D Feature Grid}
+
+The Fourier feature encoding \cite{tancik2020fourier} used in Phases~1--4 is a global trigonometric basis; its frequency support is fixed by $\sigma$, and pushing $\sigma$ higher destabilises training. A structurally different alternative for 2-D coordinate inputs is an explicit feature grid: $L$ dense planes at geometrically increasing resolution $(U_l, Z_l)$, bilinearly sampled at the input coordinate and fed to a small MLP head. This is equivalent to TensoRF \cite{chen2022tensorf} / K-Planes \cite{fridovich2023kplanes} restricted to $d=2$ and to Instant-NGP \cite{mueller2022instantngp} with the hash table replaced by a dense table; at the resolutions relevant here ($8192 \times 256$) a dense version fits in $\approx 64$\,MB and avoids hash collisions.
+
+We implemented both: G1 dense multi-resolution grid (8 levels, 2 features/level, finest $8192\times256$) and H1 Instant-NGP hash (16 levels, 2 features/level, $\log_2(T) = 19$, finest $8192$). Both use a 2-layer 64-hidden ReLU head; encoder and head are trained with separate learning rates (encoder $100\times$ the head) following the standard practice for grid-based INRs.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Architecture & SSIM & row\_corr & PSNR (dB) & Notes \\
+\midrule
+$\sigma=20$ Fourier (baseline) & 0.500 & 0.957 & 19.45 & reference \\
+$\sigma=80$ Fourier            & 0.179 & 0.336 & 6.32  & encoder destabilised \\
+G1 dense grid (10k steps)      & \textbf{0.589} & \textbf{0.974} & \textbf{20.31} & $+0.089$ SSIM \\
+H1 Instant-NGP hash (10k)      & 0.587 & 0.973 & 20.26 & $+0.087$ SSIM \\
+S2 WIRE \cite{saragadam2023wire} & 0.295 & 0.430 & 7.83  & did not converge at default $(\omega,\sigma)$ \\
+S3 FINER \cite{liu2024finer}     & 0.266 & 0.807 & 14.53 & partial convergence \\
+\bottomrule
+\end{tabular}
+\caption{R1S architecture comparison on \texttt{hq\_video\_4k\_outer\_imperfect}. Grid and hash give a clean and reproducible $+0.09$ SSIM over the Fourier baseline. Their per-row mapping accuracy (row\_corr) is also higher. WIRE and FINER are pure-MLP architectures and did not reach competitive accuracy at the paper-suggested hyperparameters within $2000$ steps; we have not yet swept their frequency / depth parameters for this 2-D problem.}
+\label{tab:phase5_arch}
+\end{table}
+
+G1 and H1 are statistically tied (Table~\ref{tab:phase5_arch}, $\Delta\mathrm{SSIM}=0.002$). We adopt G1 as the canonical Phase-5 encoder because the dense version has no \texttt{tinycudann} dependency, is deterministic across runs, and is simpler to reason about; H1 is reported as an ablation. The corresponding R1n (pure SS) runs of G1 and H1 did not transfer this gain: SSIM $0.391$ / $0.395$ vs.\ Fourier R1n $0.425$, with row\_corr essentially unchanged. We do not draw a general conclusion about grid encoders under SS from this; only that at the encoder/MLP learning rates used for R1S, the SS attachment-plus-conformal loss landscape does not preferentially exploit the additional capacity.
+
+\subsubsection{Encoder/Head Capacity Sweep}
+
+The $0.589$ SSIM plateau under G1 raises the question whether the encoder is bandwidth-limited. We tested four variants in parallel, each pushing a different axis:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llcc}
+\toprule
+Variant & Change vs.\ G1 grid baseline & SSIM & row\_corr \\
+\midrule
+G1 grid (baseline) & --- & 0.589 & 0.974 \\
+G1\_finer\_u    & finest u-res $8192 \to 16384$    & 0.588 & 0.974 \\
+G1\_richer\_feat & features/level $2 \to 4$         & 0.588 & 0.974 \\
+G1\_deeper\_mlp & MLP head $64\times 2 \to 128\times 3$ & 0.589 & 0.974 \\
+G1\_max         & all three combined                & 0.588 & 0.974 \\
+\bottomrule
+\end{tabular}
+\caption{Encoder/head capacity bumps on top of G1 dense grid, R1S 2k-step smokes. All variants flat to within $0.001$ SSIM. Within the tested range, the $0.589$ plateau is not encoder bandwidth.}
+\label{tab:phase5_capacity}
+\end{table}
+
+This rules out the simplest hypothesis but does not exhaust the capacity dimension --- larger sweeps (more levels, wider hashmap for H1, much higher finest-resolution) remain open and may behave differently.
+
+\subsubsection{Rendering-Side: Interpolation Order and Multi-Tap Sampling}
+
+If mapping accuracy is near-perfect on a per-row basis (row\_corr $0.974$), within-row pixel detail may be limited by how the strip is rendered from the CT volume rather than by where it is sampled. We tested two rendering changes.
+
+\textbf{R1 (interpolation order).} PyTorch's 3-D \texttt{grid\_sample} supports only bilinear and nearest interpolation; bicubic is available in 2-D. We implemented per-slice 2-D bicubic for strip rendering as a drop-in alternative. Bicubic underperformed (SSIM $0.508$ vs.\ bilinear $0.589$) on the existing G1 grid R1S checkpoint. The CT volume's effective bandwidth appears close to the bilinear cutoff; bicubic introduces edge ringing that does not exist in the GT video frames. Anti-ringing alternatives (Lanczos with explicit filtering, learned upsamplers) are not tested.
+
+\textbf{R2 (multi-tap radial sampling).} The emulsion is $\approx 17$\,px thick along the radial direction. A single bilinear sample uses only one of those $\approx 17$\,px. We added an option to sample at $2K+1$ points spaced $\Delta$\,px apart along the radial direction and combine them (mean, max, or mask-weighted mean).
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Variant & Span & Combine & SSIM & row\_corr \\
+\midrule
+single-tap bilinear (baseline) & 0           & ---            & \textbf{0.589} & \textbf{0.974} \\
+mt3\_mean         & $\pm 4$\,px  & mean           & 0.266          & 0.935 \\
+mt5\_mean         & $\pm 8$\,px  & mean           & 0.134          & 0.904 \\
+mt5\_max          & $\pm 8$\,px  & max (brightest) & 0.586          & 0.974 \\
+mt5\_weighted     & $\pm 8$\,px  & mask-weighted  & 0.511          & 0.959 \\
+mt7\_mean         & $\pm 12$\,px & mean           & 0.075          & 0.855 \\
+\bottomrule
+\end{tabular}
+\caption{Multi-tap radial sampling, eval-only on the G1 grid R1S checkpoint. \texttt{mt5\_max} essentially reproduces the single-tap result: the brightest tap is the central sample, indicating that pred\_xy already lands on the emulsion peak. Off-peak taps hit air, so mean modes collapse. Within this radial parameterisation, single-point sampling is not missing useful signal. Azimuthal taps (along the film surface rather than through its thickness) and learned tap weights are not tested.}
+\label{tab:phase5_multitap}
+\end{table}
+
+\subsubsection{Where the Ceiling Lives: Diagnostic via Oracle Comparison}
+
+The single most informative measurement in Phase~5 is the three-way SSIM between predicted strip, oracle strip, and GT strip on the G1 grid R1S checkpoint. To make the comparison meaningful across the three different absolute-intensity scales (raw CT, content-space, model-rendered), each strip is rescaled to $[0,1]$ via its own $[p_1, p_{99}]$ before SSIM is computed.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Comparison & SSIM & RMSE \\
+\midrule
+pred vs.\ GT     & 0.589 & 0.097 \\
+oracle vs.\ GT   & \textbf{0.756} & 0.032 \\
+pred vs.\ oracle & 0.549 & 0.053 \\
+\bottomrule
+\end{tabular}
+\caption{Three-way diagnostic on the G1 grid R1S strip. Oracle--vs--GT $= 0.756$ is the CT-rendering floor: even a geometrically perfect mapping is bounded by what the CT volume itself supports. Pred--vs--oracle isolates pure mapping error.}
+\label{tab:phase5_oracle_diagnostic}
+\end{table}
+
+If the residual mapping error were purely sub-pixel, pred--vs--oracle would be much higher than pred--vs--GT (the two share the same CT volume and sampler, only the mapping differs). Instead the two SSIM values are roughly equal, indicating that the residual mapping error has a multi-pixel character. row\_corr $= 0.974$ does not contradict this: row\_corr corrects per-row circular shifts and absorbs whole-row misalignment, but SSIM penalises the within-row pixel pattern that whole-row shifts cannot correct for.
+
+The gap decomposition is informative for future work:
+\begin{itemize}
+    \item The CT-rendering floor accounts for $1 - 0.756 = 0.244$ SSIM ``distance'' --- this is the irreducible part for our generator parameters.
+    \item The mapping error accounts for $1 - 0.549 = 0.451$ SSIM ``distance.''
+    \item The pred--vs--GT total is $1 - 0.589 = 0.411$, of which roughly $0.16$ SSIM is recoverable mapping error in principle (i.e.\ the slack between current pred--vs--oracle and a hypothetical perfect mapping with the same CT).
+\end{itemize}
+
+This suggests two complementary directions for further work: (i) a loss or training scheme that reduces the multi-pixel within-row mapping error, and (ii) generator-side changes that shift the oracle floor itself.
+
+\subsubsection{Loss-Side: Auxiliary Strip-Intensity MSE (R3)}
+
+Following the diagnostic, we tested an auxiliary loss aimed directly at within-row mapping error. The standard R1S loss is $\lVert \mathrm{pred\_xy} - \mathrm{xy\_target} \rVert^2$ in coordinate space. We added an auxiliary term $\lVert V_{\mathrm{CT}}[\mathrm{pred\_xy}] - V_{\mathrm{CT}}[\mathrm{xy\_target}] \rVert^2$, which weights coordinate errors by local CT gradient magnitude --- small in smooth emulsion regions, large near frame boundaries.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{cccc}
+\toprule
+$w_{\mathrm{strip\_mse}}$ & SSIM & row\_corr & PSNR (dB) \\
+\midrule
+0 (baseline) & 0.589 & 0.974 & 20.31 \\
+1.0  & 0.590 & 0.974 & 19.41 \\
+5.0  & 0.590 & 0.974 & 19.41 \\
+20.0 & 0.590 & 0.974 & 19.41 \\
+\bottomrule
+\end{tabular}
+\caption{Strip-intensity MSE auxiliary loss on G1 grid R1S. Three weights, identical SSIM to within $0.001$. PSNR drops slightly because the auxiliary loss pulls pred\_xy in a direction that trades coord-MSE for nothing visible to SSIM. Reading: the CT volume has many emulsion bands with similar intensity patterns, so the auxiliary loss is satisfied at multiple candidate positions, not selectively at xy\_target.}
+\label{tab:phase5_smse}
+\end{table}
+
+Within this configuration the auxiliary loss is not selective enough. An edge-weighted variant (apply the term only where $\lvert \nabla V_{\mathrm{CT}} \rvert$ exceeds a threshold, i.e.\ at frame boundaries) and a differentiable-strip-rendering loss against the GT strip directly (rather than against CT sampled at xy\_target) are not tested and remain open.
+
+\subsubsection{Phase 5 Summary}
+\label{sec:phase5_summary}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llc}
+\toprule
+Lever family & Best result vs.\ Fourier baseline (SSIM 0.500) & Status \\
+\midrule
+Architecture: G1 dense grid                & $+0.089$ to $0.589$ & winner \\
+Architecture: H1 Instant-NGP hash          & $+0.087$ to $0.587$ & winner (ties G1) \\
+Architecture: $\sigma=80$ Fourier          & $-0.321$ (collapse) & negative \\
+Architecture: WIRE, FINER (default hp)     & $-0.20$ to $-0.23$   & not yet converged \\
+Encoder/head capacity (tested range)       & $0$                 & flat in tested range \\
+Render interpolation: bicubic              & $-0.081$            & negative (ringing) \\
+Multi-tap radial (mean / max / weighted)   & $-0.003$ to $-0.51$ & best matches single-tap \\
+Loss target: strip-MSE auxiliary           & $0$                 & flat in tested range \\
+\bottomrule
+\end{tabular}
+\caption{Phase 5 lever summary on \texttt{hq\_video\_4k\_outer\_imperfect}, R1S. The architecture swap gives a clean $+0.09$ SSIM and is now our recommended encoder for HQ R1S. Several subsequent levers landed at the same $0.589$ plateau by independent paths (capacity, multi-tap-max, strip-MSE), suggesting an additional structural factor that is not addressed by any single drop-in change we tested. The diagnostic in Table~\ref{tab:phase5_oracle_diagnostic} estimates that roughly $0.16$ SSIM of recoverable mapping error remains, distinct from the $0.24$ SSIM CT-rendering floor.}
+\label{tab:phase5_summary}
+\end{table}
+
+The Phase-5 results sharpen the open question rather than closing it. The architecture pivot is a clean, reproducible gain that the thesis adopts as the new baseline. The plateau at SSIM $0.589$ has been independently encountered by multiple uncorrelated levers, which suggests the next move is unlikely to be another single-lever drop-in; the candidates that follow naturally from the diagnostic are: (i) loss objectives that target within-row pixel pattern explicitly (a differentiable rendered-strip-vs-GT-strip loss; edge-weighted intensity MSE restricted to high-gradient locations), (ii) multi-lever combinations (e.g., grid encoder $+$ edge-weighted strip-MSE $+$ azimuthal multi-tap), (iii) WIRE/FINER hyperparameter sweeps tuned for the $143{,}558$-px-effective $u$-axis, (iv) generator-side changes that lower the CT-rendering floor itself (sharper emulsion profile, modelled detector PSF), and (v) the still-untested A2 sprocket-channel addition from Section~\ref{sec:post_baseline_pattern}.
+
+\subsection{Current Best Results and Outlook}
+\label{sec:best_results}
+
+Table~\ref{tab:best_results} summarises the best-performing configuration per setting across all rounds of experimentation, including the legacy lower-resolution presets that motivated the HQ outer baseline above. These are the numbers a future approach should exceed.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llllc}
+\toprule
+Setting & Mode & Config & Metric & Value \\
+\midrule
+Procedural clean & SS & R1n ($\eta$=1e-4, emul offset) & row\_corr & 0.865 \\
+Video clean & SS & R1n & row\_corr & 0.955 \\
+Procedural imperfect & Supervised & R1S & row\_corr & 0.825 \\
+Procedural imperfect & SS & R1n (ceiling) & row\_corr & 0.548 \\
+Video imperfect & Supervised & R1S & row\_corr & 0.914 \\
+Video imperfect & SS + warm-start & R1PF1ws (DCT patch-feature) & row\_corr & 0.800 \\
+Video imperfect & Pure SS & R1n & row\_corr & 0.636 \\
+Mickey (34-wind.) synth & Supervised & R1S (\texttt{mickey\_geometry}) & row\_corr & 0.897 \\
+Real Mickey & SS fine-tune & R1T5 (synth prior) & z\_coh & 0.760 \\
+\midrule
+HQ video outer\_imperfect & Sup. (Fourier $\sigma$=20) & R1S & SSIM     & 0.500 \\
+HQ video outer\_imperfect & \textbf{Sup. (G1 grid)}    & \textbf{R1S Phase 5} & \textbf{SSIM} & \textbf{0.589} \\
+HQ video outer\_imperfect & oracle (CT-floor)          & ---  & SSIM     & 0.756 \\
+\bottomrule
+\end{tabular}
+\caption{Best results per setting. ``SS + warm-start'' = 3000 supervised steps then SS. The supervised results represent the architecture cap; the SS results represent the self-supervised ceiling. The gap between the two is the open problem. Bottom block reports the Phase-5 visual-quality results on \texttt{hq\_video\_4k\_outer\_imperfect}: the G1 dense feature grid raised the R1S SSIM from $0.500$ (Fourier baseline) to $0.589$; the oracle (CT sampled at GT $u$-map, SSIM $0.756$) is the CT-rendering floor for this preset.}
+\label{tab:best_results}
+\end{table}
+
+\paragraph{Promising approaches } Current promising future steps:
+\begin{itemize}
+    \item \textbf{Dense 2-D feature-grid encoder} (G1, Section~\ref{sec:phase5_visual_quality}): a reproducible $+0.09$ SSIM over the Fourier baseline at R1S. Adopted as the canonical encoder for HQ R1S going forward. The R1n transfer is not yet explored at appropriate learning-rate settings.
+    \item \textbf{Loss objectives that target within-row pixel pattern.} The Phase-5 diagnostic localises roughly $0.16$ SSIM of recoverable mapping error distinct from the CT-rendering floor; an edge-weighted intensity MSE or a differentiable rendered-strip-vs-GT-strip loss would target this directly. Not yet implemented.
+    \item \textbf{Multi-lever combinations.} Each Phase-5 lever was tested in isolation on top of G1. Combinations (e.g.\ grid encoder $+$ edge-weighted strip-MSE $+$ azimuthal multi-tap) are not yet tested.
+    \item \textbf{DCT patch-feature loss with warm-start} (R1PF1ws): the only SS loss that broke the 0.55 ceiling on synthetic (0.800), but requires a supervised anchor. Combining it with the synthetic prior transfer for real rolls is the next step.
+    \item \textbf{Synthetic-prior transfer} (R1T5): the only configuration that produces a non-collapsed real-roll result. The strip is geometrically coherent but content-blurry; adding a content-aware loss on top of the prior remains unexplored.
+\end{itemize}
+
+\paragraph{New synthetic roll} The synthetic experiments accumulated across nine rounds use a variety of presets, metric subsets, and training recipes that make direct comparison difficult. So atm the focus is a unified high-quality synthetic benchmark: a single, carefully parametrised roll with well-controlled geometry (eccentricity, jitter spectrum, emulsion thickness) and rich video content, generated at full resolution. All promising approaches above will be re-evaluated on this common benchmark using the full metric suite (row\_corr, median shift, z\_coh, hf\_energy, dyn\_range), providing clean apples-to-apples numbers. Because ground truth is available for every synthetic preset, this benchmark also provides a ceiling reference for any new SS loss or architecture variant before it is tested on real rolls.
+
+% ============================================================================
+% 7. DISCUSSION
+% ============================================================================
+
+\section{Discussion}
+
+ToDO
+
+% ============================================================================
+% 8. CONCLUSION
+% ============================================================================
+
+\section{Conclusion}
+
+Placeholder.
+
+% ============================================================================
+% APPENDICES
+% ============================================================================
+
+\appendix
+
+\section{Segmentation Training Details}
+\label{app:seg_training}
+
+\subsection{Dataset Preparation}
+
+Twenty-five 3D NIfTI volumes were assembled from the Mickey roll (Dataset502). Each volume groups 20 consecutive axial slices. Slices from the non-film regions (packaging, empty scanner space) were excluded before grouping. Ground-truth labels were produced semi-automatically: per-slice probability maps from an ilastik random-forest classifier provided initial label suggestions, which were then manually reviewed and corrected in 3D Slicer slice by slice.
+
+\subsection{nnU-Net Configuration}
+
+nnU-Net v2 automatically determines all preprocessing and training hyperparameters from the dataset fingerprint (voxel spacing, intensity statistics, median volume shape). No manual hyperparameter tuning was performed for nnU-Net. The key auto-configured settings for the 3D full-resolution planner on Dataset502 were:
+
+\begin{itemize}
+    \item \textbf{Patch size}: $20 \times 192 \times 192$ voxels.
+    \item \textbf{Batch size}: 2 (limited by GPU memory at this patch size).
+    \item \textbf{Normalization}: CT-style windowing with dataset-specific percentile clipping.
+    \item \textbf{Data augmentation}: nnU-Net's default augmentation pipeline (rotations, scaling, Gaussian noise, brightness, contrast, gamma, mirroring).
+    \item \textbf{Training schedule}: 1000 epochs, with early stopping based on exponential moving average of validation Dice.
+\end{itemize}
+
+\subsection{Fair Comparison Protocol}
+
+To compare models on equal footing, we define ``matched training time'': all models are trained until nnU-Net 3D's wall-clock time has elapsed, rather than using each framework's default schedule. This matters because nnU-Net 2D's default schedule is significantly longer (by design it trains until convergence on larger datasets), which causes overfitting on our 25-volume dataset and explains the large gap between nnU-Net 2D (original, 0.7485) and nnU-Net 2D (matched, 0.9717) in Table~\ref{tab:seg_results}.
+
+MONAI models (UNet3D, SwinUNETR) were trained with the AdamW optimizer, cosine learning rate decay, and the same combined CE + Dice loss as nnU-Net.
+
+\subsection{Hardware}
+
+All segmentation training was run on the PSI Merlin7 HPC cluster using NVIDIA A100 80\,GB GPUs via SLURM. nnU-Net 3D training took approximately 8 hours on a single A100.
+
+\section{Full Experiment Tables}
+\label{app:full_ablation}
+
+\subsection{Round 1--6: Clean and Imperfect Procedural Presets}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{llllcc}
+\toprule
+Round & Tag & Mechanism & Preset & row\_corr & median\_shift \\
+\midrule
+1 & R1a & LR=1e-3, att=film, no emul offset & clean\_4k & 0.04 & large \\
+1 & R1j & LR=1e-4, att=emulsion, emul offset & clean\_4k & 0.860 & 0 \\
+1 & R1n & SS, LR=1e-4, att=emulsion & clean\_4k & 0.865 & 0 \\
+\midrule
+2 & R1n & baseline & imperfect\_4k & 0.548 & 8 \\
+2 & R1o/p/q & learnable eccentricity ($\times$3 LR configs) & imperfect\_4k & 0.548 & 8 \\
+2 & R1r & hidden=512, 6 layers & imperfect\_4k & 0.551 & 8 \\
+\midrule
+3 & R1s & z-coherence TV, w=1.0 & imperfect\_4k & 0.548 & 8 \\
+3 & R1t & z-coherence TV, w=10.0 & imperfect\_4k & 0.548 & 8 \\
+\midrule
+4 & R1B1 & radial intensity, w=1, $\delta$=5 & imperfect\_4k & 0.484 & 8 \\
+4 & R1B2 & radial intensity, w=10, $\delta$=5 & imperfect\_4k & 0.461 & 8 \\
+4 & R1B3 & radial intensity, w=1, $\delta$=3 & imperfect\_4k & 0.414 & 8 \\
+4 & R1B4 & intensity z-coh, w=1 & imperfect\_4k & 0.077 & large \\
+4 & R1B5 & intensity z-coh, w=10 & imperfect\_4k & 0.056 & large \\
+4 & R1B6 & radial + z-coh combined & imperfect\_4k & 0.533 & 8 \\
+\midrule
+6 & R1P\_S & per-winding parametric, supervised & video\_4k\_imp & 0.210 & 0 \\
+6 & R1P\_n & per-winding parametric, SS & video\_4k\_imp & 0.120 & large \\
+6 & R1C1 & strip-quality loss, w=1 & video\_4k\_imp & 0.220 & large \\
+6 & R1C2 & strip-quality loss, w=10 & video\_4k\_imp & 0.140 & large \\
+6 & R1C3 & strip-quality loss, w=100 & video\_4k\_imp & 0.150 & large \\
+\bottomrule
+\end{tabular}
+\caption{Round 1--6 ablation results on procedural imperfect and video imperfect presets.}
+\end{table}
+
+\subsection{Round 7: CNN Strip Discriminator}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lllcc}
+\toprule
+Tag & Disc training data & disc weight & row\_corr (smoke) & row\_corr (full) \\
+\midrule
+R1n (no disc) & --- & --- & 0.640 & 0.640 \\
+R1S (supervised) & --- & --- & 0.801 & 0.825 \\
+R1D1 & source strip & 1.0 & 0.319 & --- \\
+R1D2 & source strip & 10.0 & 0.089 & --- \\
+R1D3 & source strip & 1.0 & 0.671 & 0.355 \\
+R1D4 & source strip & 2.0 & 0.621 & --- \\
+R1D5 & source strip & 5.0 & 0.683 & 0.358 \\
+R1D6 & source strip + strong conf & 1.0 & 0.615 & --- \\
+R1D7 & rendered-at-GT & 1.0 & 0.596 & 0.358 \\
+R1D8 & rendered-at-GT & 5.0 & 0.641 & 0.326 \\
+\bottomrule
+\end{tabular}
+\caption{Round 7 discriminator variants on \texttt{video\_4k\_imperfect}. Smoke = 1000 sup + 500 SS; full = 3000 sup + 7000 SS. D3/D5 smoke was mid-collapse, not a stable basin.}
+\end{table}
+
+\subsection{Round 9 Tracks}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lllcc}
+\toprule
+Track & Tag & Mechanism & row\_corr & Notes \\
+\midrule
+T1 & R1T1 & Per-angle base, SS & 0.07 & structural design flaw \\
+T1 & R1T1\_S & Per-angle base, supervised & 0.04 & same \\
+T2 & R1T2 & Curriculum (clean init) & 0.631 & same SS asymptote \\
+T3 & R1B\_S & B-spline supervised & 0.620 & global support needed \\
+T3 & R1B\_S12 & B-spline, 12 spans/winding & 0.627 & capacity not bottleneck \\
+T4 & R1PF1ws & DCT patch-feature, w=1, warm-start & \textbf{0.800} & synth only, collapses on real \\
+T4 & R1PF10ws & DCT patch-feature, w=10, warm-start & 0.792 & --- \\
+T5 & R1S (mick.geom) & Supervised, 34 windings & 0.897 & prior for real transfer \\
+T5 & R1T5 (real) & SS fine-tune real Mickey & z\_coh 0.760 & first non-collapsed \\
+\bottomrule
+\end{tabular}
+\caption{Round 9 five-track results. T4/T5 on \texttt{video\_4k\_imperfect}; T5 real-Mickey on unsupervised proxies.}
+\end{table}
+
+\subsection{Steps A + B: Anchor-Tether and InfoNCE (Post-Round 9)}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{llccccc}
+\toprule
+Step & Setting & w\_PF & w\_tether & z\_coh & hf & dyn\_range \\
+\midrule
+A & Real Mickey, PF+tether & 1.0 & 1.0 & 0.998 & 0.0018 & 0.217 \\
+A & Real Mickey, PF+tether & 1.0 & 10.0 & 0.998 & 0.0019 & 0.207 \\
+A & Real Mickey, PF+tether & 1.0 & 100.0 & 0.998 & 0.0019 & 0.212 \\
+A & Real Mickey, tether only & 0.0 & 10.0 & 0.778 & 0.0017 & 0.235 \\
+\midrule
+B & Synth, InfoNCE warm & 1.0 & --- & \multicolumn{3}{c}{row\_corr = 0.635} \\
+B & Synth, InfoNCE cold & 1.0 & --- & \multicolumn{3}{c}{row\_corr = 0.054} \\
+B & Synth, InfoNCE warm & 5.0 & --- & \multicolumn{3}{c}{row\_corr = 0.689} \\
+B & Real Mickey, InfoNCE & 1.0 & --- & 0.996 & --- & --- \\
+\bottomrule
+\end{tabular}
+\caption{Post-Round 9 steps. All real-Mickey PF variants collapse (z\_coh$\to$1); tether-only control matches plain R1T5. InfoNCE strictly worse than pairwise on synthetic.}
+\end{table}
+
+\section{Synthetic Generator: Roundtrip Verification}
+\label{app:roundtrip}
+
+We verify the synthetic forward model by inverting the CT intensity model. Given a rendered emulsion pixel with intensity $I$:
+\begin{equation}
+    s_{\text{recovered}} = \frac{I - I_{\text{base}}}{I_{\max} - I_{\text{base}}}.
+\end{equation}
+
+Comparing $s_{\text{recovered}}$ to the original strip row via RMSE confirms self-consistency. Clean presets achieve roundtrip RMSE $\approx 0.004$ (bilinear interpolation artefacts only); noisy presets achieve RMSE $\approx \sigma_n$.
+
+\section{Unwrapping Model: Architecture and Training Details}
+\label{app:unwrap_arch}
+
+\subsection{Input Encoding}
+
+Strip coordinates $(u, z)$ are first normalized to $[-1, 1]^2$: $\tilde{u} = 2u/N_w - 1$ and $\tilde{z} = 2z/Z - 1$. These are then lifted via random Fourier features:
+\begin{equation}
+    \gamma(\tilde{u}, \tilde{z}) = \Bigl[\cos\bigl(2\pi \bm{B} [\tilde{u}, \tilde{z}]^T\bigr),\; \sin\bigl(2\pi \bm{B} [\tilde{u}, \tilde{z}]^T\bigr)\Bigr] \in \R^{512},
+\end{equation}
+where $\bm{B} \in \R^{256 \times 2}$ is fixed at initialization with $B_{ij} \sim \mathcal{N}(0, \sigma^2)$, $\sigma = 20$. The matrix $\bm{B}$ is drawn once per run and frozen; it is not learned.
+
+The bandwidth $\sigma$ determines how many cycles the encoding can represent over $[-1,1]$. For a roll with $N_w = 28$--$34$ windings, the map $f_\theta$ must vary on a scale of $1/N_w$ in $u$, corresponding to $\approx 14$--$17$ cycles over $[0,1]$. Setting $\sigma = 20$ provides roughly $3\times$ oversampling. Earlier experiments with $\sigma = 10$ produced visibly under-fitted residuals on 28-winding geometry because the encoding could not represent the per-winding fine structure.
+
+\subsection{MLP Architecture}
+
+The encoded input passes through a 4-layer MLP with the following structure:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Layer & Input dim & Output dim \\
+\midrule
+FC$_0$ + ReLU & 512 & 256 \\
+FC$_1$ + ReLU & 256 & 256 \\
+FC$_2$ + ReLU (skip) & $256 + 512$ & 256 \\
+FC$_3$ + ReLU & 256 & 256 \\
+FC$_{\text{out}}$ & 256 & 2 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The skip connection at layer 2 concatenates the raw encoded features $\gamma$ with the hidden state, following the standard NeRF practice of re-injecting positional encoding at intermediate layers to prevent the network from losing high-frequency information in deeper layers.
+
+The output head FC$_{\text{out}}$ is zero-initialized ($\bm{W}_{\text{out}} = \bm{0}$, $\bm{b}_{\text{out}} = \bm{0}$), so the residual $\bm{r}_\theta \equiv \bm{0}$ at step 0 and the full model output equals the analytical base. This is essential: without zero-initialization, the first gradient step updates the residual before the analytical base is established as the reference point, which destabilizes early training.
+
+Total parameters: $512 \times 256 + 256 \times 256 + (256 + 512) \times 256 + 256 \times 256 + 256 \times 2 + \text{biases} \approx 460\text{K}$.
+
+\subsection{Distance Transform Computation}
+
+The attachment loss (Eq.~\ref{eq:loss_att}) requires a differentiable map from predicted 2D position to a scalar attachment score. We precompute, for each axial slice $z$, the 2D Euclidean distance transform $\mathrm{DT}^{(z)} : \R^2 \to \R_{\geq 0}$ of the emulsion mask, clamp to $[0, d_{\max}]$, and normalize to $[0, 1]$:
+\begin{equation}
+    \overline{\mathrm{DT}}^{(z)}(x, y) = 1 - \min\!\left(\mathrm{DT}^{(z)}(x,y),\; d_{\max}\right) / d_{\max},
+\end{equation}
+with $d_{\max} = 10\,\text{px}$. This gives value 1.0 at emulsion pixels and decays to 0 within $10\,\text{px}$. At training time, $\overline{\mathrm{DT}}$ is stacked into a $(1, 1, Z, H, W)$ volume and sampled at predicted positions using \texttt{torch.nn.functional.grid\_sample} (bilinear, zero-padding). This approach uses $O(Z \cdot H \cdot W)$ memory for the precomputed volume and $O(B)$ memory per batch regardless of batch size, which is critical at the $3063 \times 3062$ resolution.
+
+\subsection{Analytical Base: Seam Detection}
+
+The seam angle $\theta_{\text{seam}}$ marks where the spiral arm starts and ends. It is detected by counting, for each ray angle $\phi$, the number of emulsion-run transitions along that ray. The seam corresponds to the angle at which the innermost arm terminates, producing one fewer emulsion run than adjacent angles. In practice, we take $\theta_{\text{seam}} = \operatorname{mode}_{k=1}^{N_w}\bigl(\operatorname{arg\,min}_\phi \rho_{k,\phi}\bigr)$, where $\rho_{k,\phi}$ is the radius of the $k$-th run on ray $\phi$. For Mickey, the detected seam is at $\approx 260°$.
+
+\subsection{Optimizer and Learning Rate Schedule}
+
+\begin{itemize}
+    \item \textbf{Optimizer}: Adam with $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-8}$, no weight decay.
+    \item \textbf{Learning rate}: initial $\eta_0 = 10^{-4}$, cosine annealing to $\eta_T = 10^{-6}$: $\eta_t = \eta_T + \frac{1}{2}(\eta_0 - \eta_T)(1 + \cos(\pi t / T))$.
+    \item \textbf{Conformal ramp}: $w_{\text{conf}}(t) = w_{\text{conf}}^{\max} \cdot \min(1,\, t / 2000)$ so that attachment loss dominates the first 2000 steps. Without this ramp, the conformal gradient—which grows as the residual moves away from zero—competes with attachment from step 1, destabilizing the early convergence.
+    \item \textbf{Why $\eta_0 = 10^{-4}$, not $10^{-3}$}: at $\eta_0 = 10^{-3}$, the residual updates are large enough in the first $\sim$100 steps that the surface exits the flat region of the distance-transform (inside the emulsion slab), loses attachment gradient, and drifts. At $\eta_0 = 10^{-4}$, the surface stays within the emulsion throughout early training and the conformal loss can take effect once ramped in.
+\end{itemize}
+
+\subsection{Supervised Training Mode}
+
+In supervised mode (R1S), the self-supervised loss is replaced entirely with:
+\begin{equation}
+    \mathcal{L}_{\text{sup}} = \frac{1}{B}\sum_{i=1}^{B} \norm{f_\theta(u_i, z_i) - \bm{p}^*(u_i, z_i)}^2,
+\end{equation}
+where $\bm{p}^*(u, z) = (\bm{x}^*(u), z)$ is the ground-truth 2D position of strip coordinate $u$ in slice $z$, obtained by inverting the synthetic generator's $u$-map. Supervised samples are drawn by: (1) sampling a random emulsion pixel in the ground-truth segmentation; (2) looking up its $u_{\text{map}}$ value; (3) using $(u, z)$ as the network input and the pixel's $(x, y)$ as the target. This differs from the SS sampling, which draws $(u, z)$ uniformly from the strip domain.
+
+\section{Winding Boundary Detection: Histogram vs.\ Raycast}
+\label{app:detectors}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Detector & Mickey windings detected & Per-ray agreement \\
+\midrule
+Histogram (raw) & 11 & --- \\
+Histogram (circumference-normalised) & 26 & --- \\
+Raycast (median across 720 rays) & \textbf{34} & 76\% \\
+Raycast on synthetic clean\_4k & 28/28 & 98\% \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of winding detection methods on real Mickey and synthetic clean\_4k ground truth.}
+\end{table}
+
+The raw histogram undercounts because inner windings have smaller circumference ($\propto 2\pi r$) and thus fewer pixels per radial bin, yielding shallow valleys that fail the prominence threshold. Circumference normalisation improves this but still misses windings near pinch points. The raycast approach is robust because it measures per-run radii directly, not valley depths.
+
+\end{document}

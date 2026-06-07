@@ -45,17 +45,25 @@ def discover_volumes(data_dir):
     return pairs
 
 
-def load_volume_chunk(volume_path, probs_path):
-    """Load one 3D volume chunk and its segmentation."""
+def load_volume_chunk(volume_path, probs_path, max_slices=None):
+    """Load one 3D volume chunk and its segmentation.
+
+    If `max_slices` is provided, only the first `max_slices` z-slices are
+    read from the HDF5 — avoids OOM on large (e.g. 256-slice 4K) volumes.
+    """
     import h5py
 
     with h5py.File(volume_path, "r") as f:
-        volume = f["volume"][:].astype(np.float32)
+        ds = f["volume"]
+        n_read = ds.shape[0] if max_slices is None else min(max_slices, ds.shape[0])
+        volume = ds[:n_read].astype(np.float32)
     vmin, vmax = volume.min(), volume.max()
     volume = (volume - vmin) / (vmax - vmin + 1e-8)
 
     with h5py.File(probs_path, "r") as f:
-        probs = f["exported_data"][:].astype(np.float32)
+        ds = f["exported_data"]
+        n_read = ds.shape[0] if max_slices is None else min(max_slices, ds.shape[0])
+        probs = ds[:n_read].astype(np.float32)
     seg = np.argmax(probs, axis=-1).astype(np.int64)
 
     return volume, seg

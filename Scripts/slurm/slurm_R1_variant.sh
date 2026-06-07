@@ -65,6 +65,12 @@ MODEL_TYPE="inr"  # "inr" (Fourier+MLP) or "perwinding" (per-winding Fourier-in-
 W_STRIP_Q=0.0     # Path C: strip-quality regularizer (var + HF energy)
 W_DISC=0.0        # Path D: trained-discriminator weight
 DISC_CKPT=""      # Path D: discriminator checkpoint path
+DATA_DRIVEN_BASE=0  # Track 1: per-angle centerlines as analytical base
+INIT_FROM=""        # Track 2: path to model_final.pt to warm-init residual
+BSPLINE_U_PER=4     # Track 3: u-spans per winding for cubic B-spline
+W_PATCH_FEAT=0.0    # Track 4: DCT patch-feature z-coh weight
+W_INFONCE=0.0       # Step B: InfoNCE patch-feature contrastive weight
+# MAX_SLICES is honored from the environment if set; do not redefine here.
 
 # ── Per-variant flags ───────────────────────────────────────────────────────
 case "${VARIANT}" in
@@ -218,6 +224,58 @@ case "${VARIANT}" in
   R1D7) ATTACH=emulsion  ; SUP_STEPS=3000 ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; W_DISC=1.0 ; DISC_CKPT="/data/user/li_k1/M_thesis/unwrapping/inr/results/discriminator_imperfect_4k_rendered_at_gt/strip_discriminator.pt" ;;
   # R1D8 = R1D7 with disc weight=5 (smoke-winner R1D5 had this).
   R1D8) ATTACH=emulsion  ; SUP_STEPS=3000 ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; W_DISC=5.0 ; DISC_CKPT="/data/user/li_k1/M_thesis/unwrapping/inr/results/discriminator_imperfect_4k_rendered_at_gt/strip_discriminator.pt" ;;
+  # ── Round 9 / Track 1 ────────────────────────────────────────────────────
+  # R1T1 = R1n (pure SS winner) + data-driven analytical base. Per-angle
+  # centerlines from raycast replace concentric circles. Each winding becomes
+  # its own non-circular curve, absorbing eccentricity and a fraction of
+  # jitter into the base so the residual carries less. Expected: SS
+  # imperfect_4k 0.55 → 0.7+, video_4k_imperfect 0.64 → 0.7+.
+  R1T1)   ATTACH=emulsion ; SUP_STEPS=0      ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; DATA_DRIVEN_BASE=1 ;;
+  # R1T1_S = R1S (pure supervised) + data-driven base. Tests whether the
+  # architecture cap (0.91 on video imperfect) lifts when the base absorbs
+  # the eccentricity term the residual previously had to learn.
+  R1T1_S) ATTACH=emulsion ; SUP_STEPS=999999 ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; DATA_DRIVEN_BASE=1 ;;
+  # ── Round 9 / Track 2 ────────────────────────────────────────────────────
+  # R1T2 = R1n on imperfect, but residual weights warm-initialized from the
+  # corresponding clean-preset R1n checkpoint. INIT_FROM env var must be set
+  # by the caller (or paired-job submitter): e.g. clean → imperfect chain on
+  # `video_4k` → `video_4k_imperfect`. Expected: +0.03 to +0.08 over cold-SS.
+  R1T2)   ATTACH=emulsion ; SUP_STEPS=0      ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ;;
+  # R1T12 = Track 1 + Track 2 stacked: data-driven base AND warm-init.
+  R1T12)  ATTACH=emulsion ; SUP_STEPS=0      ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; DATA_DRIVEN_BASE=1 ;;
+  # ── Round 9 / Track 3 ────────────────────────────────────────────────────
+  # R1B_S = B-spline tensor-product residual, pure supervised. Tests whether
+  # replacing the INR's shared-MLP smoothness prior with cubic-B-spline
+  # control points lifts the architecture cap above 0.91 on video imperfect.
+  # Default geometry: 4 u-spans/winding (=112 u-spans on 28 windings) × 3
+  # z-spans, ~720 control points × 2-d ≈ 1440 params (vs INR's 460k).
+  R1B_S)  ATTACH=emulsion ; SUP_STEPS=999999 ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; MODEL_TYPE="bspline" ;;
+  # R1B_n = B-spline + pure SS. Same SS losses as R1n. Lower-priority test —
+  # SS bottleneck is loss signal, not architecture, but cheap to verify the
+  # B-spline doesn't make SS worse than the INR's 0.64.
+  R1B_n)  ATTACH=emulsion ; SUP_STEPS=0      ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; MODEL_TYPE="bspline" ;;
+  # R1B_S12 = R1B_S with 12 u-spans/winding (vs default 4). Tests whether the
+  # 0.62 ceiling on smoke is B-spline-capacity-limited (high-freq jitter
+  # needs finer knots) or a deeper generalization issue.
+  R1B_S12) ATTACH=emulsion ; SUP_STEPS=999999 ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; MODEL_TYPE="bspline" ; BSPLINE_U_PER=12 ;;
+  # ── Track 4 — DCT patch-feature z-coherence ──────────────────────────────
+  # R1PF1 = R1n cold-SS + patch-feature loss w=1. Risk of Goodhart-collapse
+  # from random init, but cheap to verify.
+  R1PF1)  ATTACH=emulsion ; SUP_STEPS=0      ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; W_PATCH_FEAT=1.0 ;;
+  # R1PF1ws = warm-start (3000 sup) + patch-feature w=1. Mirrors the R1D3
+  # recipe that worked for the discriminator at smoke length. Prior places
+  # surface in non-degenerate region first, then patch-feat refines.
+  R1PF1ws) ATTACH=emulsion ; SUP_STEPS=3000 ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; W_PATCH_FEAT=1.0 ;;
+  # R1PF10ws = R1PF1ws with stronger weight.
+  R1PF10ws) ATTACH=emulsion ; SUP_STEPS=3000 ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; W_PATCH_FEAT=10.0 ;;
+  # Step B — InfoNCE contrastive patch-feature on synthetic.
+  # R1NCE1ws: warm-start (3000 sup) + InfoNCE w=1. Mirrors R1PF1ws.
+  R1NCE1ws) ATTACH=emulsion ; SUP_STEPS=3000 ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; W_INFONCE=1.0 ;;
+  # R1NCE1n: pure SS + InfoNCE (no warm-start) — tests whether InfoNCE's
+  # collapse-immunity allows it to work without an anchor (unlike R1PF).
+  R1NCE1n)  ATTACH=emulsion ; SUP_STEPS=0    ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; W_INFONCE=1.0 ;;
+  # R1NCE5ws: stronger InfoNCE weight.
+  R1NCE5ws) ATTACH=emulsion ; SUP_STEPS=3000 ; USE_DIST=1 ; W_RES_REG=0.0  ; W_CONF=0.1   ; LR="1e-4" ; W_INFONCE=5.0 ;;
   *)   echo "Unknown variant: ${VARIANT}" >&2; exit 2 ;;
 esac
 
@@ -340,6 +398,25 @@ fi
 if awk "BEGIN{exit !(${W_DISC} > 0)}" && [ -n "${DISC_CKPT}" ]; then
   EXTRA_FLAGS="${EXTRA_FLAGS} --discriminator-ckpt ${DISC_CKPT} --w-discriminator ${W_DISC}"
 fi
+if [ "${DATA_DRIVEN_BASE}" = "1" ]; then
+  EXTRA_FLAGS="${EXTRA_FLAGS} --data-driven-base"
+fi
+if awk "BEGIN{exit !(${W_PATCH_FEAT} > 0)}"; then
+  EXTRA_FLAGS="${EXTRA_FLAGS} --w-patch-feature-zcoh ${W_PATCH_FEAT}"
+fi
+if awk "BEGIN{exit !(${W_INFONCE} > 0)}"; then
+  EXTRA_FLAGS="${EXTRA_FLAGS} --w-patch-feature-infonce ${W_INFONCE}"
+fi
+# Honor MAX_SLICES from env (may also be set per variant above).
+if [ -n "${MAX_SLICES:-}" ]; then
+  EXTRA_FLAGS="${EXTRA_FLAGS} --max-slices ${MAX_SLICES}"
+  echo "  max_slices  : ${MAX_SLICES}"
+fi
+# INIT_FROM may also be passed via env (caller submits R1T2 with INIT_FROM=/path).
+if [ -n "${INIT_FROM:-}" ]; then
+  EXTRA_FLAGS="${EXTRA_FLAGS} --init-from ${INIT_FROM}"
+  echo "  init_from   : ${INIT_FROM}"
+fi
 
 srun python -u -m unwrapping.inr.surface_train \
     --data-dir  "${SYN_DIR}" \
@@ -359,6 +436,7 @@ srun python -u -m unwrapping.inr.surface_train \
     --hidden-dim "${HIDDEN_DIM}" \
     --n-layers-mlp "${N_LAYERS_MLP}" \
     --model-type "${MODEL_TYPE}" \
+    --bspline-u-per-winding "${BSPLINE_U_PER}" \
     --log-every 50 \
     --ckpt-every "${CKPT_EVERY}" \
     ${EXTRA_FLAGS}
@@ -372,7 +450,9 @@ srun python -u -m unwrapping.inr.surface_eval \
     --attachment "${ATTACH}" \
     --centerline-erode 1 \
     --ckpt   "${TRAIN_DIR}/model_final.pt" \
-    --gt-npz "${SYN_DIR}/ground_truth.npz"
+    --gt-npz "${SYN_DIR}/ground_truth.npz" \
+    $( [ "${DATA_DRIVEN_BASE}" = "1" ] && echo "--data-driven-base" ) \
+    $( [ -n "${MAX_SLICES:-}" ] && echo "--max-slices ${MAX_SLICES}" )
 
 # ── Qualitative transfer check on real Mickey ──────────────────────────────
 # The INR was trained with synthetic geometry; running it directly on real
@@ -394,7 +474,8 @@ if [ "${EVAL_REAL}" = "1" ]; then
       --max-slices 20 \
       --attachment "${ATTACH}" \
       --centerline-erode 1 \
-      --ckpt "${TRAIN_DIR}/model_final.pt"
+      --ckpt "${TRAIN_DIR}/model_final.pt" \
+      $( [ "${DATA_DRIVEN_BASE}" = "1" ] && echo "--data-driven-base" )
 fi
 
 echo ""

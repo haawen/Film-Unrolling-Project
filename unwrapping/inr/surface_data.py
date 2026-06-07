@@ -37,8 +37,46 @@ from unwrapping.inr.geodesic_unwrap import _detect_seam_angle
 from unwrapping.inr.unwrap_data_3d import discover_volumes, load_volume_chunk
 
 
+def _circular_fill_and_smooth(per_angle, sigma_bins=8.0):
+    """Fill NaNs in a (n_layers, n_rays) array via circular interpolation along
+    the ray axis, then smooth each row with a wrap-around Gaussian.
+
+    Used by the raycast detector to produce a clean per-angle centerline for
+    each winding. NaNs occur on rays that didn't hit the k-th emulsion run
+    (e.g. near the spiral seam where the innermost winding is missing).
+    """
+    out = np.array(per_angle, dtype=np.float64, copy=True)
+    n_layers, n_rays = out.shape
+    for k in range(n_layers):
+        row = out[k]
+        valid = ~np.isnan(row)
+        if not valid.any():
+            out[k] = 0.0
+            continue
+        if valid.all():
+            continue
+        # Circular linear interpolation: extend valid samples by one period.
+        idx = np.arange(n_rays)
+        v_idx = idx[valid]
+        v_val = row[valid]
+        # Pad with wrap-around so np.interp handles the seam.
+        v_idx_pad = np.concatenate([v_idx - n_rays, v_idx, v_idx + n_rays])
+        v_val_pad = np.concatenate([v_val, v_val, v_val])
+        out[k] = np.interp(idx, v_idx_pad, v_val_pad)
+    # Wrap-around Gaussian smooth: tile the row 3× and slice the middle.
+    if sigma_bins > 0:
+        smoothed = np.empty_like(out)
+        for k in range(n_layers):
+            tiled = np.concatenate([out[k], out[k], out[k]])
+            sm = gaussian_filter1d(tiled, sigma=sigma_bins, mode="nearest")
+            smoothed[k] = sm[n_rays:2 * n_rays]
+        out = smoothed
+    return out
+
+
 def detect_winding_boundaries_raycast(seg_2d, center_yx, n_rays=720, min_run=2,
-                                       out_dir=None):
+                                       out_dir=None, return_per_angle=False,
+                                       per_angle_smooth_sigma=8.0):
     """Multi-angle ray-cast winding detector.
 
     For each ray from `center_yx`, traverse outward and count connected runs of
@@ -98,10 +136,15 @@ def detect_winding_boundaries_raycast(seg_2d, center_yx, n_rays=720, min_run=2,
 
     # Median radius of the k-th emulsion run across rays that have ≥ k+1 runs
     centerlines = np.full(n_layers, np.nan)
+    # Per-angle centerlines (n_layers, n_rays): NaN where ray didn't hit run k.
+    per_angle = np.full((n_layers, n_rays), np.nan, dtype=np.float64)
     for k in range(n_layers):
         rs = [r[k] for r in per_ray_radii if len(r) > k]
         if rs:
             centerlines[k] = float(np.median(rs))
+        for ray_idx, runs in enumerate(per_ray_radii):
+            if len(runs) > k:
+                per_angle[k, ray_idx] = runs[k]
 
     # Convert centerlines to inter-winding gap radii (same format as histogram)
     # Outermost bounds come from actual film-pixel radial extent.
@@ -118,19 +161,26 @@ def detect_winding_boundaries_raycast(seg_2d, center_yx, n_rays=720, min_run=2,
     else:
         boundaries = np.array([r_min, r_max], dtype=np.float64)
 
+    # Cleaned per-angle centerlines (NaN-filled + circular-Gaussian smoothed).
+    per_angle_clean = _circular_fill_and_smooth(
+        per_angle, sigma_bins=per_angle_smooth_sigma,
+    )
+
     if out_dir is not None:
         os.makedirs(out_dir, exist_ok=True)
         fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-        # Cross-section overlay with detected boundary circles
+        # Cross-section overlay: data-driven per-angle curves (track non-circular).
         axes[0].imshow(seg_2d, cmap="gray")
         axes[0].plot(cx, cy, "r+", markersize=12)
-        theta_circle = np.linspace(0, 2 * np.pi, 200)
-        for r in centerlines:
-            if not np.isnan(r):
-                axes[0].plot(cx + r * np.cos(theta_circle),
-                             cy + r * np.sin(theta_circle),
-                             "-", color="cyan", linewidth=0.4, alpha=0.7)
-        axes[0].set_title(f"Raycast detector → {n_layers} windings")
+        ang_plot = angles  # used by per-angle curves
+        for k in range(n_layers):
+            xs_curve = cx + per_angle_clean[k] * np.cos(ang_plot)
+            ys_curve = cy + per_angle_clean[k] * np.sin(ang_plot)
+            xs_curve = np.append(xs_curve, xs_curve[0])
+            ys_curve = np.append(ys_curve, ys_curve[0])
+            axes[0].plot(xs_curve, ys_curve, "-", color="cyan",
+                         linewidth=0.4, alpha=0.7)
+        axes[0].set_title(f"Raycast detector → {n_layers} windings (per-angle curves)")
         axes[0].set_xlim(0, W); axes[0].set_ylim(H, 0)
         # Per-ray count distribution
         axes[1].bar(counts_unique, freqs, width=0.8)
@@ -146,6 +196,8 @@ def detect_winding_boundaries_raycast(seg_2d, center_yx, n_rays=720, min_run=2,
         plt.savefig(os.path.join(out_dir, "raycast_detector.png"), dpi=150)
         plt.close()
 
+    if return_per_angle:
+        return boundaries, n_layers, per_angle_clean
     return boundaries, n_layers
 
 
@@ -246,7 +298,7 @@ class SurfaceDataset:
 
     def __init__(self, data_dir, max_slices=None, device="cuda", diag_dir=None,
                  attachment="film", centerline_erode=1,
-                 winding_detector="raycast"):
+                 winding_detector="raycast", data_driven_base=False):
         """
         Args:
             attachment: which binary mask drives the attachment loss.
@@ -258,12 +310,21 @@ class SurfaceDataset:
             winding_detector: "raycast" (default, robust to pinch points and
                 touching windings) or "histogram" (legacy, may miss windings
                 when air gaps disappear).
+            data_driven_base: if True, the analytical base uses per-angle
+                centerline radii from raycast detection (Track 1) instead of
+                concentric circles. Each winding becomes its own non-circular
+                closed curve, absorbing eccentricity and a fraction of jitter
+                into the base. Requires winding_detector="raycast".
         """
         assert attachment in ("film", "emulsion", "centerline"), attachment
         assert winding_detector in ("raycast", "histogram"), winding_detector
+        if data_driven_base and winding_detector != "raycast":
+            raise ValueError("data_driven_base=True requires winding_detector='raycast'")
         self.attachment_mode = attachment
         self.centerline_erode = centerline_erode
         self.winding_detector = winding_detector
+        self.data_driven_base = data_driven_base
+        self.per_angle_centerlines = None  # set below if data-driven
         self.device = torch.device(device)
 
         pairs = discover_volumes(data_dir)
@@ -275,7 +336,10 @@ class SurfaceDataset:
         vols, segs, z_indices = [], [], []
         slices_done = 0
         for vol_path, probs_path, z_start, z_end in pairs:
-            volume, seg = load_volume_chunk(vol_path, probs_path)
+            # Partial HDF5 read when max_slices is small: avoids OOM on
+            # large hi-res presets (e.g. 256×4K reads ~50 GB unconstrained).
+            remaining = None if max_slices is None else max(0, max_slices - slices_done)
+            volume, seg = load_volume_chunk(vol_path, probs_path, max_slices=remaining)
             D = volume.shape[0]
             for local_z in range(D):
                 vols.append(volume[local_z])
@@ -304,10 +368,22 @@ class SurfaceDataset:
         print(f"  Spool center: ({self.cy:.1f}, {self.cx:.1f})")
 
         if self.winding_detector == "raycast":
-            boundaries_np, n_layers = detect_winding_boundaries_raycast(
+            result = detect_winding_boundaries_raycast(
                 ref_seg, (cy, cx), out_dir=diag_dir,
+                return_per_angle=True,
             )
+            boundaries_np, n_layers, per_angle_clean = result
             print(f"  Raycast detector: {n_layers} windings")
+            # Always persist per-angle centerlines for Z1 (MAPS) soft
+            # supervision — they're cheap to keep, only used if --w-maps > 0.
+            # data_driven_base controls whether the analytical *base* looks
+            # them up (closed in R9 Track 1); MAPS uses them as soft targets.
+            self._per_angle_np = per_angle_clean.astype(np.float32)
+            if self.data_driven_base:
+                print(f"  Data-driven base: per-angle centerlines "
+                      f"shape={per_angle_clean.shape}, "
+                      f"r range=[{per_angle_clean.min():.1f}, "
+                      f"{per_angle_clean.max():.1f}]")
         else:
             boundaries_np, n_layers = detect_winding_boundaries_normalized(
                 ref_film_mask, (cy, cx), out_dir=diag_dir,
@@ -377,6 +453,14 @@ class SurfaceDataset:
         self.seg_stack = seg_stack
         self.boundaries = torch.from_numpy(boundaries_np.astype(np.float32)).to(self.device)
 
+        # Track 1: GPU tensor of per-angle centerlines, used by the data-driven
+        # analytical base. Indexed [winding_k, ray_idx] in pixel radii.
+        if self.data_driven_base and hasattr(self, "_per_angle_np"):
+            self.per_angle_centerlines = torch.from_numpy(
+                self._per_angle_np
+            ).to(self.device)
+            self.n_rays = int(self.per_angle_centerlines.shape[1])
+
         # Precompute per-winding delta for vectorized analytical lookup
         # segment k spans u ∈ [k, k+1), r goes from boundaries[k] → boundaries[k+1]
         self.boundary_deltas = self.boundaries[1:] - self.boundaries[:-1]   # (n_layers,)
@@ -398,6 +482,14 @@ class SurfaceDataset:
         self.pw_amp = torch.zeros((1,), device=self.device, requires_grad=False)
         self.pw_phase = torch.zeros((1,), device=self.device, requires_grad=False)
         self._pw_ecc_learnable = False
+        # A4 (per-winding angular phase): one θ-offset per winding, added to
+        # `theta` inside `analytical_xy_norm`. Off by default; enable via
+        # `enable_per_winding_theta_phase`. Targets global+per-winding angular
+        # misalignment that the INR residual learns slowly through σ=20 Fourier
+        # features. Linear interp between adjacent winding scalars; one DoF
+        # per winding (~28 scalars on HQ presets).
+        self.theta_offset = torch.zeros((1,), device=self.device, requires_grad=False)
+        self._theta_offset_learnable = False
         # CC-based winding-label volume — built lazily on first call to
         # `build_winding_label_volume`. Used for the topology-aware winding
         # penalty (R3 lever 3-alt): each emulsion pixel carries its true
@@ -485,6 +577,93 @@ class SurfaceDataset:
         self._pw_ecc_learnable = True
         return [self.pw_amp, self.pw_phase]
 
+    def sample_maps_labels(self, batch_size):
+        """Z1 — sample soft pseudo-supervision labels from the raycast
+        detector's per-angle centerlines.
+
+        Per-angle centerlines `_per_angle_np` are computed once on the
+        reference slice (n_layers, n_rays) and give the emulsion-centerline
+        radius at each (winding k, ray idx i). Each (k, i) pair maps to:
+            theta_total = 2π·k + 2π·(i / n_rays)
+            arc(θ_total) = r_inner·θ_total + 0.5·a·θ_total²
+            u_raw       = arc / total_arc * n_layers
+            (x, y)       = (cx + r·cos(theta_seam + 2π·(i/n_rays)),
+                            cy + r·sin(theta_seam + 2π·(i/n_rays)))
+
+        Synthetic geometry is z-invariant — the same (xy, u) labels apply at
+        every z. Soft (low-weight) MSE supervision against these labels gives
+        the model an angular signal at every (u, z), which pure SS lacks.
+        Differs from R9 Track 1 (data-driven base, closed) in that the seam
+        identity-switch is averaged across many labels in expectation rather
+        than baked as a hard constraint.
+
+        Returns: dict with uv_norm (B,2), u_raw (B,), z_idx (B,), xy_target (B,2).
+        """
+        if not hasattr(self, "_per_angle_np"):
+            return None
+        pa = self._per_angle_np  # (n_layers, n_rays)
+        n_rays = pa.shape[1]
+        n_layers = self.n_layers
+
+        # Random (k, i, z) indices.
+        k = torch.randint(0, n_layers, (batch_size,), device=self.device)
+        i = torch.randint(0, n_rays, (batch_size,), device=self.device)
+        z_idx = torch.randint(0, self.Z, (batch_size,), device=self.device)
+
+        # Lookup centerline radius.
+        pa_t = torch.from_numpy(pa).to(self.device) if not hasattr(self, "_pa_t") \
+               else self._pa_t
+        if not hasattr(self, "_pa_t"):
+            self._pa_t = pa_t
+        r_px = pa_t[k, i]  # (B,) — pixel radius
+
+        # Angles.
+        ray_frac = i.float() / n_rays
+        theta_within = 2.0 * math.pi * ray_frac
+        theta = self.theta_seam + theta_within
+        theta_total = 2.0 * math.pi * k.float() + theta_within
+
+        # Pixel (x, y).
+        x_px = self.cx + r_px * torch.cos(theta)
+        y_px = self.cy + r_px * torch.sin(theta)
+        x_norm = 2.0 * x_px / (self.W - 1) - 1.0
+        y_norm = 2.0 * y_px / (self.H - 1) - 1.0
+        xy_target = torch.stack([x_norm, y_norm], dim=1)
+
+        # u from arc-length.
+        a = self.spiral_advance
+        r0 = self.r_inner_centerline
+        total = self.total_arc
+        arc = r0 * theta_total + 0.5 * a * theta_total * theta_total
+        u_raw = (arc / total * n_layers).clamp(0.0, n_layers - 1e-6)
+
+        # Build uv_norm for INR.
+        u_norm = u_raw / n_layers * 2.0 - 1.0
+        if self.Z > 1:
+            z_norm = z_idx.float() / (self.Z - 1) * 2.0 - 1.0
+        else:
+            z_norm = torch.zeros(batch_size, device=self.device)
+        uv_norm = torch.stack([u_norm, z_norm], dim=1)
+
+        return {"uv_norm": uv_norm, "u_raw": u_raw,
+                "z_idx": z_idx, "xy_target": xy_target}
+
+    def enable_per_winding_theta_phase(self):
+        """A4: per-winding angular phase offset θ_offset[k] added to `theta`.
+
+        Linear interp between adjacent winding scalars when u falls between
+        integer winding indices. n_layers scalar params, init zero. Targets
+        the residual median-shift that the INR fails to absorb quickly via
+        global Fourier features. Expected magnitudes |θ_offset| < 0.05 rad
+        (corresponds to a few px at outer windings); L2-regularize via
+        --w-theta-phase-prior.
+        """
+        self.theta_offset = torch.zeros(
+            (self.n_layers,), device=self.device, requires_grad=True
+        )
+        self._theta_offset_learnable = True
+        return [self.theta_offset]
+
     def _compute_arc_parameters(self):
         """Precompute exact continuous-Archimedean parameters.
 
@@ -515,6 +694,40 @@ class SurfaceDataset:
         self.spiral_advance = float(a.item() if torch.is_tensor(a) else a)
         self.total_arc = float(total_arc.item() if torch.is_tensor(total_arc) else total_arc)
 
+    def _lookup_per_angle_radius(self, u_clamped, theta):
+        """Bilinear lookup of per-angle centerline radii (Track 1).
+
+        Args:
+            u_clamped: (B,) in [0, n_layers - eps); fractional winding index.
+            theta:     (B,) angle in radians (already includes theta_seam).
+
+        Returns: (B,) radius in pixel units.
+
+        Linear interpolation between adjacent windings (k, k+1), circular
+        linear interpolation across `n_rays` angle bins.
+        """
+        pa = self.per_angle_centerlines  # (n_layers, n_rays) float32
+        n_rays = self.n_rays
+        # Angle → fractional bin index (0..n_rays).
+        theta_mod = torch.remainder(theta, 2.0 * math.pi)
+        ang_f = theta_mod / (2.0 * math.pi) * n_rays
+        ang_lo = torch.floor(ang_f).long() % n_rays
+        ang_hi = (ang_lo + 1) % n_rays
+        ang_frac = ang_f - torch.floor(ang_f)
+
+        k_lo = u_clamped.long().clamp(0, self.n_layers - 1)
+        k_hi = (k_lo + 1).clamp(0, self.n_layers - 1)
+        k_frac = u_clamped - k_lo.float()
+
+        # Gather four corner radii.
+        r00 = pa[k_lo, ang_lo]
+        r01 = pa[k_lo, ang_hi]
+        r10 = pa[k_hi, ang_lo]
+        r11 = pa[k_hi, ang_hi]
+        r0 = r00 * (1.0 - ang_frac) + r01 * ang_frac
+        r1 = r10 * (1.0 - ang_frac) + r11 * ang_frac
+        return r0 * (1.0 - k_frac) + r1 * k_frac
+
     def analytical_xy_norm(self, u_raw):
         """Continuous Archimedean inverse: u → (x, y) on the spiral centerline.
 
@@ -531,11 +744,27 @@ class SurfaceDataset:
         total = self.total_arc
         disc = r0 * r0 + 2.0 * a * u_norm * total
         theta_total = (torch.sqrt(disc) - r0) / a
-        # r_film follows the spiral derived from r0 (film centerline);
-        # subtract the signed offset so the analytical lands on the
-        # attachment-target centerline (emulsion) when known from GT.
-        r = r0 + a * theta_total - self.emulsion_offset_signed
         theta = theta_total + self.theta_seam
+        if self._theta_offset_learnable:
+            # A4: per-winding angular phase, linearly interpolated in u.
+            k_lo = u_clamped.long().clamp(0, self.n_layers - 1)
+            k_hi = (k_lo + 1).clamp(0, self.n_layers - 1)
+            k_frac = u_clamped - k_lo.float()
+            theta = theta + (
+                self.theta_offset[k_lo] * (1.0 - k_frac)
+                + self.theta_offset[k_hi] * k_frac
+            )
+        if self.per_angle_centerlines is not None:
+            # Data-driven base (Track 1): per-winding non-circular curves.
+            # Bilinear lookup in (k_real, theta_bin) with circular wrap on theta.
+            # NOTE: the raycast detector returns emulsion-run centerline radii,
+            # so the table is ALREADY on the emulsion. Do NOT apply
+            # emulsion_offset_signed here (which is what the Archimedean base
+            # uses to convert film-centerline → emulsion-centerline).
+            r = self._lookup_per_angle_radius(u_clamped, theta)
+        else:
+            # Concentric Archimedean fallback (legacy).
+            r = r0 + a * theta_total - self.emulsion_offset_signed
         if self._ecc_learnable:
             r = r + self.ecc_amp * torch.cos(theta - self.ecc_phase)
         if self._pw_ecc_learnable:
@@ -722,6 +951,53 @@ class SurfaceDataset:
         self.gt_n_windings = int(gt["n_windings"])
         self.gt_strip = gt["strip"]     # (n_z_gt, strip_width)
 
+        # Track 1: when data-driven base is active, per-angle centerlines were
+        # detected from the actual (eccentric/jittered) segmentation. Snapping
+        # geometry to a perfect GT spiral would invalidate them. Skip the
+        # override; supervised pool (gt_zyx, gt_u_raw) is still built below.
+        if self.data_driven_base:
+            print(f"  GT loaded but geometry override SKIPPED "
+                  f"(data_driven_base=True, n_layers={self.n_layers}, "
+                  f"GT n={int(gt['n_windings'])})")
+            # Per-angle table is already on emulsion → no offset to apply.
+            self.emulsion_offset_signed = 0.0
+            if geometry_only:
+                return
+            # Build supervised pool against detected n_layers.
+            # Critical: GT u=0 corresponds to theta=0 in the synthetic
+            # generator's frame, but the analytical's u=0 is at
+            # theta=self.theta_seam. Shift GT u by theta_seam/(2π) windings
+            # so MSE-supervised pred_xy lands at the right angle.
+            emul_mask = (seg_2d == 2)
+            ys_e, xs_e = np.where(emul_mask)
+            u_at_pix = u_map_2d[ys_e, xs_e]
+            keep = ~np.isnan(u_at_pix)
+            ys_e, xs_e, u_at_pix = ys_e[keep], xs_e[keep], u_at_pix[keep]
+            u_shift = self.theta_seam / (2.0 * math.pi)
+            u_raw = (u_at_pix * self.n_layers - u_shift).astype(np.float32)
+            u_raw = np.mod(u_raw, self.n_layers)
+            u_raw = np.clip(u_raw, 0.0, self.n_layers - 1e-4)
+            print(f"  GT u shifted by -{u_shift:.4f} windings "
+                  f"(theta_seam={math.degrees(self.theta_seam):.1f}°)")
+            n_per_z = len(ys_e)
+            n_total = n_per_z * self.Z
+            idx_z = np.repeat(np.arange(self.Z, dtype=np.int64), n_per_z)
+            idx_y = np.tile(ys_e.astype(np.int64), self.Z)
+            idx_x = np.tile(xs_e.astype(np.int64), self.Z)
+            u_raw_all = np.tile(u_raw, self.Z)
+            print(f"  GT supervised pool: {n_total:,} samples "
+                  f"({n_per_z:,}/slice × {self.Z} slices)")
+            self.gt_zyx = torch.from_numpy(
+                np.stack([idx_z, idx_y, idx_x], axis=1)
+            ).to(self.device)
+            self.gt_u_raw = torch.from_numpy(u_raw_all).to(self.device)
+            xy_norm = np.stack([
+                2.0 * idx_x / (self.W - 1) - 1.0,
+                2.0 * idx_y / (self.H - 1) - 1.0,
+            ], axis=1).astype(np.float32)
+            self.gt_xy_norm = torch.from_numpy(xy_norm).to(self.device)
+            return
+
         # Unconditionally snap geometry to GT when a synthetic GT is loaded.
         # Detection is fragile (center ~6px off, seam ~4° off on clean_4k), and
         # the exact Archimedean analytical amplifies those errors into
@@ -729,7 +1005,12 @@ class SurfaceDataset:
         # Round 1 holds geometry fixed to GT; Round 2 tests detection-only runs.
         ls = float(gt["film_thickness"]) + float(gt["air_gap"])
         half_t = 0.5 * float(gt["film_thickness"])
-        r_inner_center = ls * 3.0
+        # r_inner_override is present for Mickey-matched presets; default
+        # falls back to layer_spacing*3 to match the historical generator.
+        if "r_inner_override" in gt.files:
+            r_inner_center = float(gt["r_inner_override"])
+        else:
+            r_inner_center = ls * 3.0
         r_min = r_inner_center - half_t
         r_max = r_inner_center + (self.gt_n_windings - 1) * ls + half_t
         valleys = np.array(
