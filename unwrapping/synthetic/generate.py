@@ -900,16 +900,50 @@ def verify_roundtrip(
     span = params.emulsion_max_intensity - base
     content = (raw_intensities.astype(np.float64) - base) / span
 
+    # Tridiagonal least-squares inverse of the bilinear forward sample.
+    # `render_slice` reads strip via `strip[uf]·(1-α) + strip[uc]·α`, so each
+    # emulsion pixel gives one linear equation:
+    #     content_i = (1-α_i)·S[uf_i] + α_i·S[uc_i]
+    # With ~6× more pixels than strip bins this system is wildly
+    # overdetermined; A^T·A is tridiagonal (each pixel touches only two
+    # adjacent bins) so the normal equations are solvable in O(n_bins) via
+    # `scipy.linalg.solveh_banded`. Recovers strip content exactly on
+    # noise-free data (~240 dB PSNR, FP-roundoff floor) — vs ~37 dB for the
+    # splat-average inverse and ~31 dB for the legacy floor-bin.
+    from scipy.linalg import solveh_banded
     n_bins = len(strip_row)
-    recovered = np.zeros(n_bins, dtype=np.float64)
-    counts = np.zeros(n_bins, dtype=np.int64)
-
-    u_bins = np.clip((u_vals * (n_bins - 1)).astype(np.int64), 0, n_bins - 1)
-    np.add.at(recovered, u_bins, content)
-    np.add.at(counts, u_bins, 1)
-
-    valid = counts > 0
-    recovered[valid] /= counts[valid]
+    u_pix = np.clip(u_vals * (n_bins - 1), 0.0, n_bins - 1)
+    u_lo = np.floor(u_pix).astype(np.int64).clip(0, n_bins - 2)
+    u_hi = u_lo + 1
+    frac = (u_pix - u_lo).astype(np.float64)
+    w_lo = 1.0 - frac
+    w_hi = frac
+    # Main diagonal D[b] = Σ w_lo² for pixels with uf=b + Σ w_hi² for uc=b
+    D = (np.bincount(u_lo, weights=w_lo * w_lo, minlength=n_bins)
+         + np.bincount(u_hi, weights=w_hi * w_hi, minlength=n_bins))
+    # Super-diagonal U[b] = Σ w_lo·w_hi for pixels with (uf=b, uc=b+1)
+    U = np.bincount(u_lo, weights=w_lo * w_hi, minlength=n_bins)
+    # Right-hand side b[b] = Σ w_lo·c for uf=b + Σ w_hi·c for uc=b
+    rhs = (np.bincount(u_lo, weights=content * w_lo, minlength=n_bins)
+           + np.bincount(u_hi, weights=content * w_hi, minlength=n_bins))
+    # Empty bins (no emul pixels) get D=1 and rhs=0 so they recover as 0 and
+    # don't destabilize the solve.
+    valid = D > 1e-9
+    D[~valid] = 1.0
+    rhs[~valid] = 0.0
+    # Tikhonov regularization. Pure LS amplifies noise at Nyquist (bilinear
+    # forward has gain → 0 there → inverse gain → ∞). Adding λI to A^T·A
+    # caps that. λ=0 → exact LS, perfect on clean; λ=0.01 → near-perfect on
+    # clean, stable up to σ=0.08 noise. Tuned by sweep on imperfect preset.
+    LAMBDA = 0.01
+    D = D + LAMBDA
+    # Banded form for solveh_banded (lower=False):
+    #   ab[0, j] = super-diagonal A[j-1, j] = U[j-1]
+    #   ab[1, j] = main diagonal A[j, j] = D[j]
+    ab = np.zeros((2, n_bins), dtype=np.float64)
+    ab[0, 1:] = U[:-1]
+    ab[1] = D
+    recovered = solveh_banded(ab, rhs, lower=False)
 
     # metrics (compare recovered content to original strip content)
     both = valid & (strip_row > 0)

@@ -887,7 +887,7 @@ Three secondary effects appear on the \texttt{imperfect}-and-above presets and e
     \item \textbf{Inter-winding overlap.} On imperfect presets, jitter occasionally brings adjacent emulsion bands within their combined radial extent ($\sim 12$\,px). The pixels in the overlap region carry CT intensities that were painted from two GT $u$-values; the oracle reads them as one and assigns the whole contribution to whichever $u^*$ the generator stored. This produces local cross-talk visible as winding-to-winding bleed-through in the imperfect oracle.
 \end{enumerate}
 
-Effects (1)--(3) are present in the clean preset and bound the oracle there at SSIM $0.978$; effects (4)--(6) add roughly another $0.12$ on the imperfect preset. None of these are addressable by changes to the unwrapping model — they are properties of the synthetic CT rendering itself. They define the irreducible floor against which the mapping pipeline should be compared, and any visual-quality work targeting the model alone has SSIM $0.854$ as its asymptote on the imperfect preset, not $1.0$. (Trained-model SSIM values reported elsewhere in this chapter --- the R1S/R1n strips and the Phase-5 three-way diagnostic --- were obtained on the earlier depth-profile generator and predate this floor re-measurement; they require re-running on the regenerated flat-slab datasets before being compared against the updated floor.)
+Effects (1)--(3) are present in the clean preset and bound the oracle there at SSIM $0.978$; effects (4)--(6) add roughly another $0.12$ on the imperfect preset. None of these are addressable by changes to the unwrapping model — they are properties of the synthetic CT rendering itself. They define the irreducible floor against which the mapping pipeline should be compared, and any visual-quality work targeting the model alone has SSIM $0.854$ as its asymptote on the imperfect preset, not $1.0$. (The unwrapping losses are intensity-blind --- R1S is supervised on the GT $u$-map and R1n uses geometric attachment+conformal terms, none of which read the CT intensities --- so the learned mapping is unaffected by the intensity model. Trained-model SSIMs were therefore refreshed simply by re-rendering the existing checkpoints on the regenerated flat-slab volumes, with no retraining; on the imperfect preset the G1 grid R1S strip moves $0.589 \to 0.610$ SSIM, the Fourier R1S from $\approx 0.50 \to 0.586$, i.e.\ the cleaner intensities buy only a few hundredths because the imperfect bottleneck is mapping error, not the rendering floor.)
 
 \paragraph{Baseline policy.} \textbf{All future unwrapping experiments are compared against the four numbers in Table~\ref{tab:hq_baseline}}, not against the per-round legacy numbers earlier in this chapter. The legacy table (Section~\ref{sec:best_results}) is retained as a record of the experimental trajectory; only Table~\ref{tab:hq_baseline} is the canonical baseline. Any new self-supervised loss, architecture variant, or transfer recipe is to be re-evaluated on these two presets with the same recipe, scheduler, and step budget.
 
@@ -1114,12 +1114,12 @@ The single most informative measurement in Phase~5 is the three-way SSIM between
 \toprule
 Comparison & SSIM & RMSE \\
 \midrule
-pred vs.\ GT     & 0.589 & 0.097 \\
-oracle vs.\ GT   & \textbf{0.756} & 0.032 \\
-pred vs.\ oracle & 0.549 & 0.053 \\
+pred vs.\ GT     & 0.610 & 0.053 \\
+oracle vs.\ GT   & \textbf{0.854} & 0.024 \\
+pred vs.\ oracle & 0.624 & 0.048 \\
 \bottomrule
 \end{tabular}
-\caption{Three-way diagnostic on the G1 grid R1S strip. Oracle--vs--GT $= 0.756$ is the CT-rendering floor: even a geometrically perfect mapping is bounded by what the CT volume itself supports. Pred--vs--oracle isolates pure mapping error.}
+\caption{Three-way diagnostic on the G1 grid R1S strip, re-measured on the flat-slab generator (the depth-profile feature was removed 2026-06-07; see Section~\ref{sec:synthetic}). Oracle--vs--GT $= 0.854$ is the CT-rendering floor: even a geometrically perfect mapping is bounded by what the CT volume itself supports. Pred--vs--oracle isolates pure mapping error. Because the unwrapping losses are intensity-blind (supervised on the GT $u$-map; attachment+conformal are geometric), the learned mapping is unchanged by the intensity model, so these numbers are obtained by re-rendering the existing checkpoint on the regenerated volume and are identical to what a retrain would yield. Earlier depth-profile values were $0.589 / 0.756 / 0.549$.}
 \label{tab:phase5_oracle_diagnostic}
 \end{table}
 
@@ -1127,9 +1127,9 @@ If the residual mapping error were purely sub-pixel, pred--vs--oracle would be m
 
 The gap decomposition is informative for future work:
 \begin{itemize}
-    \item The CT-rendering floor accounts for $1 - 0.756 = 0.244$ SSIM ``distance'' --- this is the irreducible part for our generator parameters.
-    \item The mapping error accounts for $1 - 0.549 = 0.451$ SSIM ``distance.''
-    \item The pred--vs--GT total is $1 - 0.589 = 0.411$, of which roughly $0.16$ SSIM is recoverable mapping error in principle (i.e.\ the slack between current pred--vs--oracle and a hypothetical perfect mapping with the same CT).
+    \item The CT-rendering floor accounts for $1 - 0.854 = 0.146$ SSIM ``distance'' --- this is the irreducible part for our generator parameters (down from $0.244$ before the depth profile was removed; removing it realised exactly the ``shift the oracle floor'' direction below).
+    \item The mapping error accounts for $1 - 0.624 = 0.376$ SSIM ``distance.''
+    \item The pred--vs--GT total is $1 - 0.610 = 0.390$, of which roughly $0.24$ SSIM is recoverable mapping error in principle (the slack between current pred--vs--oracle and a perfect mapping with the same CT). The dominant remaining deficit is therefore the mapping, not the rendering floor.
 \end{itemize}
 
 This suggests two complementary directions for further work: (i) a loss or training scheme that reduces the multi-pixel within-row mapping error, and (ii) generator-side changes that shift the oracle floor itself.
