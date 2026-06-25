@@ -70,6 +70,37 @@ def winding_seeds(phi, r, ref_phi=math.pi, dphi=math.radians(10.0), max_gap=14.0
     return np.array(seeds)
 
 
+def filmband_seeds(FB_ref, rayi, n_rays, half_deg=6.0):
+    """Per-winding seed radii: most-complete single ray + spacing infill.
+
+    Pooling rays smears windings (eccentricity sweeps a winding ~one spacing over
+    ~20deg). So instead: scan +-half_deg of rays and pick the ONE ray with the most
+    detected film bands (windings stay separable on a single ray), then INFILL
+    windings the detector missed there — a missing winding shows up as a gap that is
+    ~k x the median single-winding spacing, so split such gaps evenly. Recovers
+    skipped windings without merging neighbours. Returns sorted seed radii.
+    """
+    half = max(1, int(round(half_deg / 360.0 * n_rays)))
+    best, bestn = rayi, -1
+    for d in range(-half, half + 1):
+        r = (rayi + d) % n_rays
+        c = int(np.sum(~np.isnan(FB_ref[r])))
+        if c > bestn:
+            bestn, best = c, r
+    bands = np.sort(FB_ref[best][~np.isnan(FB_ref[best])])
+    if bands.size < 2:
+        return bands
+    med = float(np.median(np.diff(bands)))                 # typical 1-winding spacing
+    out = [bands[0]]
+    for i in range(1, len(bands)):
+        g = bands[i] - bands[i - 1]
+        nfill = max(0, int(round(g / med)) - 1)            # missing windings in gap
+        for j in range(1, nfill + 1):
+            out.append(bands[i - 1] + g * j / (nfill + 1))
+        out.append(bands[i])
+    return np.array(out)
+
+
 def fit_winding(phi_w, r_w, seed_r, eps, n_bins, gate, degree):
     tb, rb = coarse_bin_track(phi_w, r_w, eps, TWO_PI - eps, seed_r,
                               n_bins=n_bins, gate=gate)
@@ -98,8 +129,11 @@ def main():
     ap.add_argument("--seam-exclude-deg", type=float, default=8.0)
     ap.add_argument("--filmband-cache", default=None,
                     help="anchor_filmband_*.npz — robust per-winding seed radii "
-                         "(continuous film bands at one ray; avoids the dashed-"
-                         "emulsion seeding failure).")
+                         "(continuous film bands; avoids the dashed-emulsion "
+                         "seeding failure).")
+    ap.add_argument("--seed-ray-halfdeg", type=float, default=6.0,
+                    help="Pool film bands over +-this many deg of rays for seeding "
+                         "(recovers windings that drop out at a single ray).")
     ap.add_argument("--multitap-n", type=int, default=1)
     ap.add_argument("--multitap-delta-px", type=float, default=3.0)
     ap.add_argument("--z-step", type=int, default=1)
@@ -148,8 +182,9 @@ def main():
         fb = np.load(args.filmband_cache)
         FB = fb["FB"]; nr = int(fb["n_rays"])
         rayi = int(round((np.mod(seam + math.pi, TWO_PI)) / TWO_PI * nr)) % nr
-        seeds = np.sort(FB[ref, rayi][~np.isnan(FB[ref, rayi])])
-        print(f"  seeds from film-band cache (ray {rayi}, th=seam+pi)")
+        seeds = filmband_seeds(FB[ref], rayi, nr, half_deg=args.seed_ray_halfdeg)
+        print(f"  seeds from film-band cache (ray {rayi} +-{args.seed_ray_halfdeg}deg, "
+              f"pooled+clustered)")
     else:
         seeds = winding_seeds(PHI[ref], RR[ref])
     nw = len(seeds)

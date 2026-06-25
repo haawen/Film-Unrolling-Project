@@ -1,19 +1,20 @@
 #!/bin/bash
-# End-to-end: build Dataset504 (Roll2 2D) from 4 labelled slices →
-# plan+preprocess → train 250 epochs → predict on all 1936 slices →
-# stack into 97-chunk Probabilities.h5 matching 02_Sample_3d/.
+# Train ONLY: Dataset504 (Roll2 2D) from 4 labelled slices, 250 epochs.
+# Then run a held-out inference on a few non-training z-locations to
+# visually verify generalization. No full-roll prediction, no unwrapping —
+# the downstream pipeline is wired up only after the seg is judged good.
 
 #SBATCH --cluster=gmerlin7
-#SBATCH --job-name=ds504
-#SBATCH --output=logs/ds504_%j.out
-#SBATCH --error=logs/ds504_%j.err
+#SBATCH --job-name=ds504_train
+#SBATCH --output=logs/ds504_train_%j.out
+#SBATCH --error=logs/ds504_train_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus=1
 #SBATCH --mem=180G
 #SBATCH --partition=a100-daily
-#SBATCH --time=08:00:00
+#SBATCH --time=04:00:00
 
 set -euo pipefail
 PROJECT_DIR="$HOME/M_thesis"
@@ -22,14 +23,15 @@ DATASET_ID=504
 DATASET_NAME="Dataset504_Roll2_2D"
 RAW_TIFFS="${PROJECT_DIR}/02_Sample_raw"
 LABEL_PROBS="${PROJECT_DIR}/data/roll2_probs"
-PAIRS="${PROJECT_DIR}/02_Sample_3d"
-N_EPOCHS=250
-
 NN_RAW="${PROJECT_DIR}/nnUNet_data/nnUNet_raw/${DATASET_NAME}"
 NN_PRE="${PROJECT_DIR}/nnUNet_data/nnUNet_preprocessed"
 NN_RES="${PROJECT_DIR}/nnUNet_data/nnUNet_results"
-PRED_RAW="${PROJECT_DIR}/nnUNet_data/imagesTs_02Sample_full_2d"
-PRED_OUT="${PROJECT_DIR}/nnUNet_data/predictions_02Sample_full_2d"
+
+# Held-out verification: a few z-locations NOT in {200, 700, 1200, 1700}
+HELDOUT_DIR="${PROJECT_DIR}/nnUNet_data/imagesTs_504_heldout"
+HELDOUT_PRED="${PROJECT_DIR}/nnUNet_data/predictions_504_heldout"
+HELDOUT_VIS="${PROJECT_DIR}/02_Sample_seg_check_504"
+HELDOUT_Z=(50 450 950 1450 1850 100 500)   # 7 spots spread across the roll
 
 export nnUNet_raw="${PROJECT_DIR}/nnUNet_data/nnUNet_raw"
 export nnUNet_preprocessed="${NN_PRE}"
@@ -38,16 +40,17 @@ export nnUNet_results="${NN_RES}"
 source /opt/psi/Programming/anaconda/2024.08/conda/etc/profile.d/conda.sh
 conda activate nnunet
 cd "${PROJECT_DIR}"
-mkdir -p logs "${NN_RAW}/imagesTr" "${NN_RAW}/labelsTr" "${PRED_RAW}" "${PRED_OUT}"
+mkdir -p logs "${NN_RAW}/imagesTr" "${NN_RAW}/labelsTr" \
+              "${HELDOUT_DIR}" "${HELDOUT_PRED}" "${HELDOUT_VIS}"
 
 echo "==============================================="
-echo "  Dataset504 (Roll2 2D) end-to-end pipeline"
+echo "  Dataset504 train-only pipeline"
 echo "  start: $(date)"
 echo "==============================================="
 
-# --- 1. Build Dataset504 from raw TIFFs + Ilastik probabilities ---
+# --- 1. Build Dataset504 (idempotent) ---
 echo ""
-echo "--- [1/6] Build Dataset504 ---"
+echo "--- [1/4] Build Dataset504 ---"
 python -u - <<PY
 import os, json
 import numpy as np
@@ -62,11 +65,9 @@ lbl_out = "${NN_RAW}/labelsTr"
 for z in [200, 700, 1200, 1700]:
     src_tiff = os.path.join(raw_dir, f"{z:04d}.tiff")
     img = np.array(Image.open(src_tiff))
-    # nnU-Net 2D expects single-channel uint16 image with _0000 suffix.
     Image.fromarray(img).save(os.path.join(img_out, f"Sample_{z:04d}_0000.tif"))
-
     with h5py.File(os.path.join(prob_dir, f"{z:04d}_Probabilities.h5"), "r") as h:
-        probs = h["exported_data"][...]    # (H, W, 3) float32
+        probs = h["exported_data"][...]
     labels = np.argmax(probs, axis=-1).astype(np.uint8)
     Image.fromarray(labels).save(os.path.join(lbl_out, f"Sample_{z:04d}.tif"))
     print(f"  z={z:04d}: img+label written, class fractions = "
@@ -84,134 +85,75 @@ with open(os.path.join("${NN_RAW}", "dataset.json"), "w") as f:
 print("  dataset.json written")
 PY
 
-# --- 2. Plan + preprocess ---
+# --- 2. Plan + preprocess (idempotent) ---
 echo ""
-echo "--- [2/6] plan + preprocess ---"
+echo "--- [2/4] plan + preprocess ---"
 nnUNetv2_plan_and_preprocess -d ${DATASET_ID} --verify_dataset_integrity
 
-# --- 3. Train 2D fold 0 ---
+# --- 3. Train 2D with -f all (no CV split since we only have 4 samples) ---
 echo ""
-echo "--- [3/6] train 2D fold 0 (${N_EPOCHS} epochs) ---"
-# Subclass the default trainer to override num_epochs.
+echo "--- [3/4] train 2D fold=all (built-in nnUNetTrainer_250epochs) ---"
+nnUNetv2_train ${DATASET_ID} 2d all -tr nnUNetTrainer_250epochs --npz
+
+# --- 4. Held-out inference + visual check ---
+echo ""
+echo "--- [4/4] Held-out inference on a few z-locations ---"
 python -u - <<PY
 import os
-# Mirror nnUNetTrainer's exact __init__ signature so its locals()-based
-# my_init_kwargs capture works. Star-args break that capture.
-trainer_src = '''
-import torch
-from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
-
-class nnUNetTrainerShort(nnUNetTrainer):
-    def __init__(self,
-                 plans: dict,
-                 configuration: str,
-                 fold: int,
-                 dataset_json: dict,
-                 unpack_dataset: bool = True,
-                 device: torch.device = torch.device("cuda")):
-        super().__init__(plans, configuration, fold, dataset_json,
-                         unpack_dataset, device)
-        self.num_epochs = ${N_EPOCHS}
-        self.save_every = 50
-'''
-import nnunetv2.training.nnUNetTrainer as pkg
-target = os.path.join(os.path.dirname(pkg.__file__), "variants", "nnUNetTrainerShort.py")
-os.makedirs(os.path.dirname(target), exist_ok=True)
-with open(target, "w") as f:
-    f.write(trainer_src)
-print(f"  trainer written to {target}")
-PY
-nnUNetv2_train ${DATASET_ID} 2d 0 -tr nnUNetTrainerShort --npz
-
-# --- 4. Predict on all 1936 raw TIFFs ---
-echo ""
-echo "--- [4/6] stage 1936 raw TIFFs for prediction ---"
-python -u - <<PY
-import os, shutil
 src = "${RAW_TIFFS}"
-dst = "${PRED_RAW}"
-os.makedirs(dst, exist_ok=True)
-for f in sorted(os.listdir(src)):
-    if not f.endswith(".tiff"):
-        continue
-    name = os.path.splitext(f)[0]  # e.g. "0200"
+dst = "${HELDOUT_DIR}"
+for z in ${HELDOUT_Z[@]@K}:
+    z_int = int(z)
+    name = f"{z_int:04d}"
     target = os.path.join(dst, f"Sample_{name}_0000.tif")
     if not os.path.exists(target):
-        os.symlink(os.path.join(src, f), target)
-print(f"  staged {len(os.listdir(dst))} symlinks → {dst}")
+        os.symlink(os.path.join(src, f"{name}.tiff"), target)
+print(f"  staged {len(os.listdir(dst))} held-out symlinks → {dst}")
 PY
 
-echo ""
-echo "--- [5/6] nnUNet predict on 1936 slices ---"
-nnUNetv2_predict -i "${PRED_RAW}" -o "${PRED_OUT}" \
-    -d ${DATASET_ID} -c 2d -tr nnUNetTrainerShort -f 0 \
-    --save_probabilities --disable_tta
+nnUNetv2_predict -i "${HELDOUT_DIR}" -o "${HELDOUT_PRED}" \
+    -d ${DATASET_ID} -c 2d -tr nnUNetTrainer_250epochs -f all \
+    --disable_tta
 
-# --- 6. Stack per-slice softmax → per-chunk Probabilities.h5 ---
-echo ""
-echo "--- [6/6] Stack 1936 per-slice softmax → 97 chunk Probabilities.h5 ---"
+# Build CT+label overlays for visual inspection
 python -u - <<PY
-import os, glob, re
-import numpy as np
-import h5py
+import os, numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from PIL import Image
 
-pred = "${PRED_OUT}"
-pairs = "${PAIRS}"
+raw = "${RAW_TIFFS}"
+pred_dir = "${HELDOUT_PRED}"
+out_dir = "${HELDOUT_VIS}"
 
-# Collect per-slice .npz softmax files (nnU-Net 2D names them Sample_<NNNN>.npz)
-files = sorted(glob.glob(os.path.join(pred, "Sample_*.npz")))
-print(f"  found {len(files)} per-slice softmax outputs")
+for f in sorted(os.listdir(pred_dir)):
+    if not f.endswith(".tif"): continue
+    z_str = f.replace("Sample_", "").replace(".tif", "")
+    z = int(z_str)
+    ct = np.array(Image.open(os.path.join(raw, f"{z:04d}.tiff")))
+    pred = np.array(Image.open(os.path.join(pred_dir, f)))
+    fracs = [(pred == c).mean() for c in [0, 1, 2]]
 
-# Group by chunk based on existing volume_*.h5 files in PAIRS
-chunk_files = sorted(glob.glob(os.path.join(pairs, "volume_*-*.h5")))
-print(f"  found {len(chunk_files)} existing CT chunks in {pairs}")
-
-for cf in chunk_files:
-    name = os.path.basename(cf)
-    m = re.match(r"volume_(\d+)-(\d+)\.h5", name)
-    if not m: continue
-    z0, z1 = int(m.group(1)), int(m.group(2))
-    out_path = os.path.join(pairs, name.replace(".h5", "_Probabilities.h5"))
-    if os.path.exists(out_path) and os.path.getsize(out_path) > 10 * 1024 * 1024:
-        print(f"  skip {name} (probs exist)"); continue
-
-    # The TIFF naming starts at 0001.tiff = z=0 in chunker order? Actually the
-    # chunker uses sorted file order. Filenames are 0001.tiff..1936.tiff so
-    # filename-1 == zero-based index. Chunk z0=1000 means filenames 1001..1020.
-    # But chunk volume_1000-1019.h5 contains the slices in chunker zero-index
-    # 1000..1019 → filenames 1001.tiff..1020.tiff (assuming 1-indexed input).
-    # ACTUAL: the chunker reads sorted .tiff files and labels chunks by index.
-    # Check tiff_to_hdf5_chunks.py to confirm; here we assume filename i+1
-    # maps to chunker index i.
-    stack = []
-    for i in range(z0, z1 + 1):
-        # Match: chunker index i ↔ filename (i+1). e.g. index 1000 ↔ 1001.tiff
-        # ↔ Sample_1001.npz
-        nf = os.path.join(pred, f"Sample_{i+1:04d}.npz")
-        if not os.path.exists(nf):
-            raise SystemExit(f"missing softmax: {nf}")
-        d = np.load(nf)
-        # nnU-Net 2D saves as (C, 1, H, W) or (C, H, W). Squeeze + transpose.
-        p = d["probabilities"]
-        if p.ndim == 4 and p.shape[1] == 1:
-            p = p[:, 0]   # (C, H, W)
-        if p.shape[0] in (2, 3, 4):
-            p = np.transpose(p, (1, 2, 0))   # (H, W, C)
-        stack.append(p.astype(np.float32))
-    arr = np.stack(stack, axis=0)        # (Z, H, W, C)
-    Z, H, W, C = arr.shape
-    chunks = (min(8, Z), min(512, H), min(512, W), C)
-    with h5py.File(out_path, "w") as h:
-        h.create_dataset("exported_data", data=np.ascontiguousarray(arr),
-                         compression="lzf", chunks=chunks)
-    print(f"  wrote {name.replace('.h5','_Probabilities.h5')} shape={arr.shape}")
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    axes[0].imshow(ct, cmap="gray"); axes[0].set_title(f"CT z={z}"); axes[0].axis("off")
+    cmap = np.zeros((*pred.shape, 3), dtype=np.uint8)
+    cmap[pred == 1] = [0, 150, 200]
+    cmap[pred == 2] = [255, 0, 150]
+    axes[1].imshow(cmap)
+    axes[1].set_title(f"Pred  cyan=base ({fracs[1]:.3f})  magenta=emul ({fracs[2]:.3f})")
+    axes[1].axis("off")
+    ct_n = ((ct - ct.min()) / max(1, ct.max() - ct.min()) * 255).astype(np.uint8)
+    overlay = (0.55 * np.stack([ct_n] * 3, axis=-1) + 0.45 * cmap).astype(np.uint8)
+    axes[2].imshow(overlay); axes[2].set_title("Overlay"); axes[2].axis("off")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"check_z{z:04d}.png"), dpi=110)
+    plt.close()
+    print(f"  wrote check_z{z:04d}.png  (emul {fracs[2]*100:.2f}%)")
 PY
-
-# Render seg previews for visual verification
-python -u Scripts/visualize_seg_samples.py \
-    --pairs-dir "${PAIRS}" --out-dir "${PROJECT_DIR}/02_Sample_seg_samples_504" --n-samples 8 || true
 
 echo ""
 echo "==============================================="
-echo "  Dataset504 pipeline done at $(date)"
+echo "  Dataset504 train + verify done at $(date)"
+echo "  visual checks: ${HELDOUT_VIS}/"
 echo "==============================================="
