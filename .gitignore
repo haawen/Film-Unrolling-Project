@@ -26,6 +26,7 @@ logs/
 *.nrrd
 *.mha
 *.png
+*.mp4
 
 # Training checkpoints and logs
 *.pt

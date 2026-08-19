@@ -278,6 +278,44 @@ def aggregate(per_pair):
     return agg
 
 
+def _uniform_frames(frames, H, W):
+    out = []
+    for f in frames:
+        im = Image.fromarray((np.clip(f, 0, 1) * 255).astype(np.uint8)).resize((W, H))
+        out.append(np.asarray(im).astype(np.uint8))
+    return out
+
+
+def export_aligned_videos(triplets, out_dir, fps=12):
+    """Write aligned_pred.mp4 + aligned_gt.mp4 (same WxH, same order) so a
+    libvmaf tool (ffmpeg-quality-metrics) can score VMAF on the ALIGNED pair —
+    raw videos would mismatch on rotation/crop/temporal. pred = registered +
+    histogram-matched; gt = its matched frame."""
+    H = triplets[0][0].shape[0]
+    W = max(t[0].shape[1] for t in triplets)
+    W += W % 2
+    for name, idx in [("aligned_pred", 0), ("aligned_gt", 1)]:
+        wr = imageio.get_writer(os.path.join(out_dir, f"{name}.mp4"), fps=fps,
+                                codec="libx264", quality=9, macro_block_size=1)
+        for t in triplets:
+            wr.append_data(_uniform_frames([t[idx]], H, W)[0])
+        wr.close()
+
+
+def compute_fid(triplets, device, out_dir):
+    """FID between the aligned pred-frame set and GT-frame set (dumps PNGs)."""
+    dp = os.path.join(out_dir, "_fid_pred")
+    dg = os.path.join(out_dir, "_fid_gt")
+    os.makedirs(dp, exist_ok=True)
+    os.makedirs(dg, exist_ok=True)
+    for i, t in enumerate(triplets):
+        Image.fromarray((np.clip(t[0], 0, 1) * 255).astype(np.uint8)).save(
+            os.path.join(dp, f"{i:04d}.png"))
+        Image.fromarray((np.clip(t[1], 0, 1) * 255).astype(np.uint8)).save(
+            os.path.join(dg, f"{i:04d}.png"))
+    return M.fid_folders(dp, dg, device)
+
+
 def save_montage(triplets, out_path, n=6):
     """triplets: list of (pred, gt, diff). Save n evenly-spaced rows."""
     if not triplets:
@@ -324,6 +362,11 @@ def main():
                     help="Refine each match within +/-N GT frames by best "
                          "gradient-correlation (absorbs sync jitter). 0 = off.")
     ap.add_argument("--no-leader-trim", action="store_true")
+    ap.add_argument("--fid", action="store_true",
+                    help="Also compute set-level FID (needs pyiqa).")
+    ap.add_argument("--export-aligned", action="store_true",
+                    help="Write aligned_pred.mp4 + aligned_gt.mp4 for VMAF "
+                         "(ffmpeg-quality-metrics) on the aligned pair.")
     ap.add_argument("--learned", action="store_true",
                     help="Also compute DISTS/LPIPS + BRISQUE/NIQE (needs pyiqa).")
     ap.add_argument("--device", default="cpu")
@@ -380,6 +423,15 @@ def main():
         triplets.append((bm, a, np.abs(bm - a)))
 
     agg = aggregate(per_pair)
+    if args.fid:
+        if M.HAS_PYIQA:
+            print("Computing FID (set-level)...", flush=True)
+            agg["fid"] = compute_fid(triplets, args.device, args.out_dir)
+        else:
+            print("  WARNING: --fid needs pyiqa; skipping.")
+    if args.export_aligned:
+        print("Exporting aligned_pred.mp4 + aligned_gt.mp4...", flush=True)
+        export_aligned_videos(triplets, args.out_dir)
     result = {
         "pred": os.path.abspath(args.pred),
         "gt": os.path.abspath(args.gt),

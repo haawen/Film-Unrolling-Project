@@ -1,0 +1,28 @@
+\chapter{Evaluation Methodology}
+\label{chap:evaluation-methodology}
+
+\section{A Cross-Modal Metric Suite}
+\label{sec:eval-metrics}
+%% TODO: Structural (SSIM/MS-SSIM/PSNR), learned full-reference
+%% (DISTS/LPIPS), learned no-reference (BRISQUE/NIQE/CLIP-IQA/MUSIQ),
+%% distributional (FID), industry (VMAF), and cross-modal-robust
+%% (NMI, gradient correlation) metric families, with their caveats.
+
+\section{Registration}
+\label{sec:eval-registration}
+%% TODO: Gradient-domain phase correlation (default) vs.\ ECC
+%% similarity-transform registration; temporal alignment (linear
+%% winning over DTW).
+
+\section{GT Frame-Matching}
+\label{sec:eval-framematching}
+%% TODO: The cell-quantized dynamic-programming matcher pairing every
+%% GT frame to a continuously re-cut strip cell; the calibration
+%% steps needed to trust it (zoom calibration, motion-masked scoring,
+%% temporal-offset validation).
+
+\section{Measuring Stillness}
+\label{sec:eval-stillness}
+%% TODO: The temporal-median sharpness arbiter and stillness
+%% cross-correlation, used to judge stabilization quality without a
+%% frame-paired GT signal.

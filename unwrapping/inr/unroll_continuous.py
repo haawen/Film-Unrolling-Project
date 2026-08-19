@@ -101,6 +101,25 @@ def load_seg_mid(probs_path):
     return np.argmax(probs_mid, axis=-1).astype(np.int64), mid
 
 
+def load_seg_slices(probs_path, frac=1.0):
+    """Read `frac` of a chunk's z-slices' segmentation, evenly spaced in z.
+
+    frac=1.0 -> all 20 slices of the chunk; 0.5 -> ~10, etc. The 2.2 GB prob map
+    is opened once and only the selected slices are decompressed. Returns a list of
+    (seg_2d, slice_index) so the caller can walk many z-slices per chunk (dense
+    anchors) instead of just the mid one. Used for the 50/75/100%-of-slices renders.
+    """
+    with h5py.File(probs_path, "r") as f:
+        ds = f["exported_data"]
+        Z = ds.shape[0]
+        n = max(1, int(round(frac * Z)))
+        idxs = np.unique(np.linspace(0, Z - 1, n).round().astype(int))
+        # decompress the whole (z-chunked) prob map ONCE — per-slice ds[i] reads
+        # re-decompress the entire 2.2 GB map each time (~20x slower per chunk).
+        arr = ds[:]                                       # (Z, H, W, 3)
+    return [(np.argmax(arr[int(i)], axis=-1).astype(np.int64), int(i)) for i in idxs]
+
+
 def norm_slice(img):
     """Robust per-slice normalization to [0,1] (1-99 pct) -> kills z-banding."""
     lo, hi = np.percentile(img, [1, 99])

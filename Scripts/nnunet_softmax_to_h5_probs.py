@@ -74,9 +74,16 @@ def main():
         # 1) Find the class dim (a single dim with value 2-4) and move it last.
         class_dims = [i for i, s in enumerate(probs.shape) if 2 <= s <= 4]
         if len(class_dims) != 1:
-            raise ValueError(
-                f"{nf}: cannot identify class axis (shape={probs.shape})"
-            )
+            # A small FINAL partial chunk (e.g. the last 4 slices) has a z-depth
+            # in [2,4] that collides with the 3-class axis. The class axis has
+            # size == n_classes (3); prefer it. (Chunk depth is 20 elsewhere.)
+            three = [i for i in class_dims if probs.shape[i] == 3]
+            if len(three) == 1:
+                class_dims = three
+            else:
+                raise ValueError(
+                    f"{nf}: cannot identify class axis (shape={probs.shape})"
+                )
         probs = np.moveaxis(probs, class_dims[0], -1)
         # 2) Of the remaining three spatial dims, Z is the smallest (chunk depth ~20
         #    vs H/W ~3064). Move it first.
@@ -84,6 +91,21 @@ def main():
         z_axis = int(np.argmin(spatial))
         probs = np.moveaxis(probs, z_axis, 0)
         # Now probs is (Z, H, W, C)
+        # 3) ORIENT (H,W) to the CT chunk. nnU-Net/NIfTI can silently TRANSPOSE
+        #    H<->W (both ~3062-3063, indistinguishable by size) — this produced a
+        #    transposed seg for the full-scroll run, so the emulsion-walk ran on a
+        #    reflected mask (fits looked ~ok but the render was wrong). Read the
+        #    matching CT volume and swap H<->W if they are reversed.
+        try:
+            with h5py.File(os.path.join(args.pairs_dir, vol_name), "r") as vf:
+                key = "image" if "image" in vf else list(vf.keys())[0]
+                vshape = vf[key].shape
+            ct_hw = tuple(vshape[-2:])            # (H, W) of the CT chunk
+            if probs.shape[1:3] == ct_hw[::-1] and ct_hw[0] != ct_hw[1]:
+                probs = np.swapaxes(probs, 1, 2)  # (Z,W,H,C) -> (Z,H,W,C)
+                print(f"    ORIENTED seg H<->W to match CT {ct_hw}")
+        except Exception as e:
+            print(f"    WARN: could not orient to CT ({e}); leaving as-is")
         probs = np.ascontiguousarray(probs.astype(np.float32, copy=False))
 
         # Clamp chunk dims to data dims (Z is small, H/W are large).

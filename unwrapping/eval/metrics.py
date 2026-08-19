@@ -115,6 +115,12 @@ def psnr(a, b, L=1.0):
     return float(10 * np.log10(L * L / mse))
 
 
+def msad(a, b):
+    """Mean sum of absolute differences (ffmpeg-quality-metrics' MSAD), on
+    [0,1]. Lower=better. Intensity-sensitive (like PSNR) — secondary."""
+    return float(np.mean(np.abs(a - b)))
+
+
 # --------------------------------------------------------------------------- #
 # Learned perceptual + no-reference (optional, via pyiqa)
 # --------------------------------------------------------------------------- #
@@ -188,6 +194,22 @@ def nr_metrics(a, device="cpu"):
     }
 
 
+def vif(a, b, device="cpu"):
+    """Visual Information Fidelity (full-reference, HIGHER=better, ~[0,1]).
+    Information-theoretic perceptual FR metric (Sheikh & Bovik)."""
+    m = _pyiqa_metric("vif", device)
+    return float(m(_to_tensor(a), _to_tensor(b)).item())
+
+
+def fid_folders(dir_pred, dir_gt, device="cpu"):
+    """Frechet Inception Distance between two folders of images (LOWER=better).
+    Set-level distribution distance (Inception-V3 features); no per-frame
+    correspondence needed. Biased for small N (we have ~229 frames) — report as
+    indicative, not exact."""
+    m = _pyiqa_metric("fid", device)
+    return float(m(dir_pred, dir_gt))
+
+
 def fr_pair_metrics(a, b, with_learned=False, device="cpu"):
     """All full-reference metrics for one aligned, histogram-matched pair."""
     out = {
@@ -196,8 +218,10 @@ def fr_pair_metrics(a, b, with_learned=False, device="cpu"):
         "ssim": ssim(a, b),
         "ms_ssim": ms_ssim(a, b),
         "psnr": psnr(a, b),
+        "msad": msad(a, b),
     }
     if with_learned and HAS_PYIQA:
         out["dists"] = dists(a, b, device)
         out["lpips"] = lpips(a, b, device)
+        out["vif"] = vif(a, b, device)
     return out

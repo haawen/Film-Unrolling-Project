@@ -1,0 +1,38 @@
+/data/user/li_k1/M_thesis/unwrapping/inr/unroll_walk_wholeroll.py:202: RuntimeWarning: All-NaN slice encountered
+  signed = np.nanmedian(D, axis=2)
+/data/user/li_k1/M_thesis/unwrapping/inr/unroll_walk_wholeroll.py:203: RuntimeWarning: All-NaN slice encountered
+  dist = np.nanmedian(np.abs(D), axis=2)
+/data/user/li_k1/M_thesis/unwrapping/inr/unroll_walk_wholeroll.py:212: RuntimeWarning: All-NaN slice encountered
+  dist = np.nanmedian(np.abs(D - shift), axis=2)
+loaded cached walks for 500 anchors
+  smoothed per-chunk centers across z (sigma 20 anchors)
+  per-anchor winding counts after dedup(min-sep 6.0): [33, 33, 33, 33, 32, 32, 33, 33, 32, 32, 32, 33, 32, 32, 32, 33, 32, 31, 31, 32, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 32, 32, 33, 32, 33, 33, 33, 32, 33, 32, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 32, 32, 33, 33, 32, 32, 32, 32, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 32, 32, 32, 32, 33, 33, 33, 31, 32, 32, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 33, 32, 35, 34, 31, 32, 31, 33, 33, 35, 33, 33, 33, 33, 32, 35, 32, 32, 32, 31, 30, 32, 30, 34, 35, 36, 36, 35, 35, 33, 34, 34, 35, 37, 33, 35, 34, 34, 33, 32, 36, 31, 32, 32, 32, 32, 36, 33, 33, 33, 33, 33, 33, 33, 33, 33, 37, 33, 32, 36, 32, 36, 37, 36, 33, 37, 37, 37, 36, 37, 35, 36, 37, 37, 36, 35, 37, 37, 37, 37, 38, 38, 37, 37, 34, 34, 33, 32, 33, 33, 37, 34, 38, 33, 33, 33, 38, 33, 33, 33, 31, 32, 37, 33, 33, 37, 31, 34, 32, 31, 32, 33, 34, 34, 31, 31, 34, 34, 34, 33, 33, 33, 33, 33, 31, 31, 34, 33, 37, 32, 37, 32, 33, 33, 33, 33, 32, 38, 33, 30, 32, 32, 35, 35, 35, 32, 33, 34, 32, 31, 33, 35, 31, 32, 32, 33, 35, 33, 32, 33, 33, 32, 34, 34, 33, 34, 33, 32, 33, 34, 34, 33, 33, 33, 32, 33, 32, 33, 33, 33, 33, 34, 33, 32, 32, 36, 36, 39, 32, 33, 33, 33, 33, 32, 38, 31, 38, 29, 31, 38, 38, 38, 31, 31, 31, 31, 31, 33, 34, 34, 32, 31, 32, 34, 33, 33, 33, 33, 33, 32, 32, 33, 30, 33, 39, 32, 33, 33, 32, 36, 33, 32, 32, 33, 32, 38, 39, 33, 34, 34, 33, 35, 32, 32, 32, 34, 33, 32, 33, 33, 33, 32, 32, 32, 32, 32, 32, 32, 31, 34, 31, 32, 37, 35, 34, 32, 32, 31, 32, 32, 32, 32, 32, 35, 34, 36, 37, 37, 34, 33, 34, 35, 32, 31, 31, 32, 32, 38, 39, 39, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 38, 38, 33, 33, 33, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 31, 32, 32, 31, 32, 32, 32, 33, 32, 33, 32, 32, 33, 33, 33, 33, 32, 31, 32, 32, 33, 33, 34, 34, 33, 32, 33, 32, 31, 32, 33, 34, 32, 32, 33, 34, 32, 33, 33, 33, 32, 33, 31, 32, 34, 34, 34, 33, 34, 34, 33, 32, 32, 33, 33, 33, 33, 32, 33, 33]
+  z-sequential tracking -> 63 winding tracks
+  63 windings (track); per-winding anchor coverage min/med/max = 1/284/500
+  ref_r spacing px: min 0 med 14 max 26  (a ~2x-median gap = a winding NEVER walked anywhere = a seeding miss)
+  ref_r (inner->outer): [504, 516, 524, 533, 551, 567, 574, 596, 602, 614, 615, 626, 640, 650, 667, 687, 706, 707, 724, 742, 749, 760, 779, 798, 803, 812, 819, 838, 857, 874, 894, 919, 939, 960, 965, 980, 986, 1005, 1019, 1026, 1051, 1065, 1074, 1086, 1100, 1108, 1125, 1147, 1169, 1169, 1195, 1207, 1219, 1228, 1235, 1246, 1262, 1272, 1290, 1310, 1310, 1332, 1338]
+  coverage per winding: [14, 15, 5, 1, 14, 15, 7, 43, 8, 137, 100, 17, 73, 500, 500, 466, 265, 174, 493, 434, 2, 418, 490, 478, 1, 1, 446, 475, 368, 491, 474, 457, 496, 211, 284, 7, 484, 494, 5, 456, 500, 1, 495, 3, 498, 1, 499, 492, 482, 20, 495, 1, 500, 12, 1, 496, 18, 486, 494, 281, 219, 292, 408]
+  50 windings kept (coverage >= 8)
+  gap-infill inserted 2 never-walked windings (touching pairs)
+  whole roll: 52 windings, 234338 cols
+  drew anchor 0 z836
+  drew anchor 55 z954
+  drew anchor 110 z1081
+  drew anchor 166 z1269
+  drew anchor 221 z1449
+  drew anchor 277 z1564
+  drew anchor 332 z1681
+  drew anchor 388 z1782
+  drew anchor 443 z1872
+  drew anchor 499 z1981
+Done (inspect). montage in unwrapping/inr/results/walk_dense_track
+geometry = raw
+anchor 0 z836: 52 windings -> full
+anchor 62 z982: 52 windings -> full
+anchor 125 z1100: 52 windings -> full
+anchor 187 z1351: 52 windings -> full
+anchor 250 z1499: 52 windings -> full
+anchor 312 z1648: 52 windings -> full
+anchor 375 z1749: 52 windings -> full
+anchor 437 z1864: 52 windings -> full
+anchor 499 z1981: 52 windings -> full
