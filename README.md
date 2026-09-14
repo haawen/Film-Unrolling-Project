@@ -9,10 +9,10 @@ CT cross-section  →  3D semantic segmentation  →  per-winding geometry traci
 ```
 
 <p align="center">
-  <img src="docs/media/unroll_compare_4way.gif" width="820" alt="Reconstructed frames vs. the ground-truth optical scan">
+  <img src="docs/media/final_result_gt_vs_ours.gif" width="820" alt="Final restored result vs. the ground-truth optical scan">
 </p>
 
-<p align="center"><em>Frames reconstructed purely from CT geometry (left, two pipeline iterations) next to the real optical scan of the same reel (right) — the reconstruction was never shown the ground truth.</em></p>
+<p align="center"><em>Final result: real optical scan (left) vs. frames reconstructed purely from CT geometry, after de-shading + denoising (right) — the reconstruction was never shown the ground truth.</em></p>
 
 ---
 
@@ -63,8 +63,13 @@ The same physical reel also exists as a conventional optical scan, which makes t
 | LPIPS ↓ | 0.143 |
 | DISTS ↓ | 0.125 |
 
+<p align="center">
+  <img src="docs/media/unroll_compare_4way.gif" width="720" alt="Pipeline iteration comparison vs. ground truth">
+  <br><sub>Pipeline iteration, each checked against the same GT frame: an earlier geometry version, two densities of the current emulsion-walk, and the real scan.</sub>
+</p>
+
 ### 4. Post-processing
-A final restoration pass removes the broad brightness/shading field inherent to the unrolling (geometry-aware, content-masked de-shading) and denoises grain via a pretrained temporal video denoiser (FastDVDnet, zero-shot).
+The geometry-only strip still carries a broad brightness/shading field from the unrolling and CT/emulsion grain. A final restoration pass removes both: geometry-aware, content-masked de-shading, then a pretrained temporal video denoiser (FastDVDnet, zero-shot) for grain. This de-shaded + denoised video is the final result shown at the top of this README.
 
 ### Synthetic data generator
 Since real ground-truth 3D geometry doesn't exist, a synthetic generator rolls arbitrary 2D footage into a CT-realistic spiral (physically motivated intensity model, configurable eccentricity/jitter/noise) to benchmark unwrapping methods against known geometry before applying them to the real scan.
