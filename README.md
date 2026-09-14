@@ -1,96 +1,106 @@
-# Virtual Unrolling of Movie Rolls
-Project at [Paul Scherrer Institute (PSI)](https://www.psi.ch/) investigating deep learning segmentation methods for high-quality tomography scans of historical movie rolls.
+# Virtual Unrolling of Historical Movie Rolls
 
-The project can be roughly split into 2 steps: Segmentation and INR modelling.
-The segmentation step identifies the film layers within CT cross-sections, a prerequisite for virtual unrolling. We compare multiple 2D and 3D architectures under fair, controlled conditions.
+A two-stage computer vision pipeline that reconstructs playable film footage from **X-ray CT scans of tightly wound, physically inaccessible movie reels** — without ever unspooling them. Built at the [Paul Scherrer Institute (PSI)](https://www.psi.ch/) on a real 1930s Mickey Mouse reel scanned at ~3700×3700 px per cross-section.
 
----
-
-## Models
-
-Five model configurations are trained and evaluated on the same data splits:
-
-| Model | Framework | Type | Dataset | Patch Size |
-|-------|-----------|------|---------|------------|
-| **nnU-Net 2D** | nnU-Net v2 | 2D | Dataset501 (50 TIF) | auto-configured |
-| **nnU-Net 2D (matched)** | nnU-Net v2 | 2D | Dataset503 (500 slices from 3D) | auto-configured |
-| **nnU-Net 3D** | nnU-Net v2 | 3D | Dataset502 (25 NIfTI volumes) | auto-configured |
-| **UNet3D** | MONAI | 3D | Dataset502 | 16 x 256 x 256 |
-| **SwinUNETR** | MONAI | 3D | Dataset502 | 32 x 256 x 256 |
-
-All models segment 3 classes: background, foreground_1 (film base), and foreground_2 (emulsion layer).
-
----
-
-## Results
-
-All models evaluated on the same 5 hold-out 3D volumes (fold 0, ~3063 x 3062 x 20 voxels each).
-
-| Model | Dice | IoU | Precision | Recall |
-|-------|------|-----|-----------|--------|
-| **nnU-Net 3D** | **0.9728** | **0.9475** | 0.9718 | 0.9738 |
-| nnU-Net 2D (matched) | 0.9717 | 0.9454 | 0.9725 | 0.9709 |
-| UNet3D | 0.9447 | 0.8969 | 0.9428 | 0.9467 |
-| SwinUNETR | 0.9350 | 0.8788 | 0.9243 | 0.9459 |
-| nnU-Net 2D (orig) | 0.7485 | 0.6280 | 0.9234 | 0.6809 |
-
-![Score comparison](docs/images/fair_comparison.png)
-
-![Overlay comparison](docs/images/fair_overlay_comparison.png)
-
-### nnU-Net 3D — Ground Truth vs Prediction
-
-Side-by-side comparison at full resolution (case Mickey3D_1263, z=10). Yellow = background, blue = foreground_1, red = foreground_2.
-
-![GT vs Pred](docs/images/nnunet3d_gt_vs_pred.png)
-
-
-## Datasets
-
-| ID | Name | Description |
-|----|------|-------------|
-| 501 | Dataset501_MickeyScroll | 50 independent 2D TIF images converted from HDF5 |
-| 502 | Dataset502_MickeyScroll3D | 25 3D NIfTI volumes (~20 slices each, 3063 x 3062 XY) |
-| 503 | Dataset503_MickeyScroll2Dfrom3D | 500 2D TIF slices extracted from Dataset502 |
-
-Dataset503 enables fair 2D vs 3D comparison by ensuring the 2D model sees slices from the same volumes as the 3D models.
-
----
-
-## Project Structure
+The CT scan shows the film spool end-on: dozens of concentric layers of base + emulsion, wound ~34 times around a spool. The goal is to trace every winding through the 3D volume and unroll it into a flat strip — recovering the original frames.
 
 ```
-Scripts/
-  train_nnunet.py           # nnU-Net 2D training (HDF5 -> TIF + training)
-  train_monai.py            # MONAI training (UNet3D, SwinUNETR)
-  predict_monai.py          # MONAI inference
-  fair_compare.py           # Fair comparison across all models
-  compare_results.py        # Result aggregation and plots
-  convert_3d_data.py        # HDF5 -> NIfTI conversion (Dataset502)
-  create_2d_from_3d.py      # Dataset502 -> Dataset503
-  custom_trainer.py         # nnUNetTrainerProgress (250 epochs, tqdm)
-  visualize.py              # 2D prediction visualization
-  visualize_nnunet3d.py     # 3D prediction visualization (high-quality)
-  slurm/                    # SLURM job scripts (Merlin7 A100)
-  setup/                    # One-time HPC setup scripts + guide
+CT cross-section  →  3D semantic segmentation  →  per-winding geometry tracing  →  unrolled strip  →  frames
+```
+
+<p align="center">
+  <img src="docs/media/unroll_compare_4way.gif" width="820" alt="Reconstructed frames vs. the ground-truth optical scan">
+</p>
+
+<p align="center"><em>Frames reconstructed purely from CT geometry (left, two pipeline iterations) next to the real optical scan of the same reel (right) — the reconstruction was never shown the ground truth.</em></p>
+
+---
+
+## Pipeline
+
+### 1. Segmentation
+Each CT cross-section is segmented into 3 classes — background, film base, emulsion — as the geometric foundation for tracing individual windings. Five architectures (2D/3D nnU-Net, 3D UNet, SwinUNETR) were trained and compared under identical data splits.
+
+| Model | Dice | IoU |
+|-------|------|-----|
+| **nnU-Net 3D** | **0.973** | **0.948** |
+| nnU-Net 2D (matched) | 0.972 | 0.945 |
+| UNet3D | 0.945 | 0.897 |
+| SwinUNETR | 0.935 | 0.879 |
+| nnU-Net 2D (original) | 0.749 | 0.628 |
+
+<p align="center">
+  <img src="docs/images/nnunet3d_gt_vs_pred.png" width="640" alt="nnU-Net 3D ground truth vs. prediction">
+  <br><sub>nnU-Net 3D prediction (right) vs. ground truth (left) on a held-out cross-section.</sub>
+</p>
+<p align="center">
+  <img src="docs/images/fair_comparison.png" width="640" alt="Model comparison bar chart">
+</p>
+
+### 2. Winding geometry — the emulsion walk
+Simply counting rings radially fails wherever the emulsion layer is faint or dashed (which happens throughout the roll). Instead, each winding is traced by **walking along the emulsion band itself**, slice by slice:
+
+- A raycast detector seeds an approximate radius per winding at a sparse set of z-anchors.
+- From each seed, the walk follows the local emulsion centerline outward in azimuth, re-centering on the segmented band at every step — so it self-corrects instead of drifting.
+- A z-consistency pass (profile tracking + outlier healing) catches windings that jump onto a neighboring layer mid-turn.
+- Columns are cut at uniform **arc length** along the film rather than uniform angle, which removes the periodic "breathing" distortion that a naive polar unrolling introduces.
+
+<p align="center">
+  <img src="docs/media/ct_windings_overlay.jpg" width="820" alt="Detected windings overlaid on a CT cross-section">
+  <br><sub>Per-winding geometry (colored by winding index) traced directly on the raw CT cross-section.</sub>
+</p>
+
+The result: all ~34 windings recovered with zero fabricated/interpolated geometry, unrolled into a single continuous strip hundreds of thousands of pixels long, then cut into individual frames.
+
+### 3. Validation against ground truth
+The same physical reel also exists as a conventional optical scan, which makes this one of the few settings where a CT-based reconstruction can be checked frame-by-frame against real footage. Frames are matched to the optical scan via cell-quantized dynamic programming and scored with a modality-robust metric suite (structural/gradient correlation, MS-SSIM, LPIPS/DISTS) rather than pixel MSE — plain PSNR turned out to be a misleading metric here, penalizing sharp line-art edges and small shading drift far out of proportion to actual visual quality.
+
+| Metric | Value |
+|---|---|
+| Grad-correlation | 0.788 |
+| MS-SSIM | 0.857 |
+| SSIM | 0.776 |
+| LPIPS ↓ | 0.143 |
+| DISTS ↓ | 0.125 |
+
+### 4. Post-processing
+A final restoration pass removes the broad brightness/shading field inherent to the unrolling (geometry-aware, content-masked de-shading) and denoises grain via a pretrained temporal video denoiser (FastDVDnet, zero-shot).
+
+### Synthetic data generator
+Since real ground-truth 3D geometry doesn't exist, a synthetic generator rolls arbitrary 2D footage into a CT-realistic spiral (physically motivated intensity model, configurable eccentricity/jitter/noise) to benchmark unwrapping methods against known geometry before applying them to the real scan.
+
+---
+
+## Project structure
+
+```
+Scripts/                        # Segmentation training/eval + data conversion utilities
+  train_nnunet.py, train_monai.py, predict_monai.py, fair_compare.py
+  convert_3d_data.py, create_2d_from_3d.py, export_seg_slices.py, ...
+  slurm/                        # HPC (SLURM) job scripts for the pipeline stages above
+unwrapping/
+  synthetic/generate.py         # CT-realistic spiral-roll data generator
+  inr/                          # Winding geometry + rendering
+    walk_emulsion.py            # Emulsion-band walk (per-winding tracing)
+    unroll_walk_wholeroll_v13.py  # Whole-roll assembly, arc-length columns
+    winding_raycast.py          # Winding-count seeding
+    surface_*.py, *_model.py    # INR-based residual mapping (synthetic benchmark track)
+    make_film_video.py          # Strip -> playable video
+  eval/                         # Ground-truth frame matching, stabilization, metrics
+    frame_match.py, stabilize_affine.py, compare_videos.py, metrics.py
+video_restoration/               # De-shading + denoising post-processing
+docs/images/, docs/media/        # Figures used in this README
 ```
 
 ---
 
 ## Setup
 
-### Local (Windows)
-
 ```bash
-conda create -n nnunet python=3.12 -y
-conda activate nnunet
+conda create -n thesis python=3.12 -y
+conda activate thesis
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-### HPC
-```
-The models in this project were trained on an HPC cluster with A100 80GB GPUs. Equivalent computing power is expected for complete retraining.
-
----
-
+Segmentation training and the full-resolution unwrapping pipeline were run on an HPC cluster with A100 80GB GPUs; equivalent compute is expected for full retraining or a from-scratch re-walk of the real scan.

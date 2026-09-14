@@ -194,6 +194,7 @@ def main():
                          "GT-validated video_bounds.npy exported by "
                          "unwrapping.eval.frame_match — overrides --phase-lock.")
     ap.add_argument("--rotate", action="store_true", help="Rotate frames 90 deg.")
+    ap.add_argument("--rot-k", type=int, default=1, help="Number of CCW 90deg turns when --rotate (1 default; 3 = clockwise).")
     ap.add_argument("--reverse", action="store_true", help="Play outer->inner.")
     ap.add_argument("--invert", action="store_true",
                     help="Invert intensities (the CT film image is a NEGATIVE).")
@@ -281,7 +282,7 @@ def main():
         if args.invert:
             fr = 1.0 - fr
         if args.rotate:
-            fr = np.rot90(fr)
+            fr = np.rot90(fr, args.rot_k)
         im = Image.fromarray((fr * 255).astype(np.uint8)).resize((Wf, H))
         wr.append_data(np.asarray(im))
         if c % 50 == 0:
@@ -299,7 +300,7 @@ def main():
         if args.invert:
             fr = 1.0 - fr
         if args.rotate:
-            fr = np.rot90(fr)
+            fr = np.rot90(fr, args.rot_k)
         tiles.append(np.asarray(
             Image.fromarray((fr * 255).astype(np.uint8)).resize((160, 240))))
     cols = 8; rows = int(np.ceil(len(tiles) / cols))
