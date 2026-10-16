@@ -1,18 +1,19 @@
 """
 Convert 3D HDF5 volumes to nnU-Net / MONAI NIfTI format.
 
-Input (01_Mickey_3d/):
+Input (data/01_Mickey_3d/):
     volume_XXXX-YYYY.h5               → key 'volume',        shape (Z, H, W), uint16
     volume_XXXX-YYYY_Probabilities.h5  → key 'exported_data', shape (Z, H, W, 3), float32
 
-Output (nnUNet_data/nnUNet_raw/Dataset502_MickeyScroll3D/):
+Output (Segmentation/nnUNet_data/nnUNet_raw/Dataset502_MickeyScroll3D/):
     imagesTr/Mickey3D_XXXX_0000.nii.gz   (single-channel, float32, z-y-x)
     labelsTr/Mickey3D_XXXX.nii.gz        (uint8 segmentation via argmax)
     dataset.json
 
 Usage:
-    python Scripts/convert_3d_data.py                  # convert all
-    python Scripts/convert_3d_data.py --dataset-id 502 # custom dataset ID
+    python Scripts/convert_3d_data.py --nnunet-raw work/rebuilt_nnUNet_raw
+    python Scripts/convert_3d_data.py --hdf5-dir data/01_Mickey_3d \
+        --nnunet-raw work/rebuilt_nnUNet_raw
 """
 
 import argparse
@@ -27,8 +28,8 @@ import numpy as np
 # ─── Defaults ────────────────────────────────────────────────────────────────
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-HDF5_DIR = BASE_DIR / "01_Mickey_3d"
-NNUNET_RAW = BASE_DIR / "nnUNet_data" / "nnUNet_raw"
+HDF5_DIR = BASE_DIR / "data" / "01_Mickey_3d"
+NNUNET_RAW = BASE_DIR / "Segmentation" / "nnUNet_data" / "nnUNet_raw"
 
 DATASET_ID = 502
 DATASET_PREFIX = "MickeyScroll3D"
@@ -45,7 +46,7 @@ AFFINE = np.eye(4)
 
 def convert(args):
     dataset_name = f"Dataset{args.dataset_id:03d}_{DATASET_PREFIX}"
-    dataset_dir = NNUNET_RAW / dataset_name
+    dataset_dir = args.nnunet_raw / dataset_name
     images_dir = dataset_dir / "imagesTr"
     labels_dir = dataset_dir / "labelsTr"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -53,11 +54,13 @@ def convert(args):
 
     # Discover volume files (exclude Probabilities files)
     vol_files = sorted([
-        f for f in HDF5_DIR.glob("volume_*.h5")
+        f for f in args.hdf5_dir.glob("volume_*.h5")
         if "Probabilities" not in f.name
     ])
 
-    print(f"Found {len(vol_files)} volumes in {HDF5_DIR}")
+    print(f"Found {len(vol_files)} volumes in {args.hdf5_dir}")
+    if not vol_files:
+        raise FileNotFoundError(f"No volume_*.h5 CT files in {args.hdf5_dir}")
     print(f"Output → {dataset_dir}\n")
 
     num_converted = 0
@@ -128,5 +131,9 @@ def convert(args):
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Convert 3D HDF5 volumes to nnU-Net NIfTI")
     p.add_argument("--dataset-id", type=int, default=DATASET_ID)
+    p.add_argument("--hdf5-dir", type=Path, default=HDF5_DIR,
+                   help="directory with paired CT and ilastik probability HDF5 files")
+    p.add_argument("--nnunet-raw", type=Path, default=NNUNET_RAW,
+                   help="nnU-Net raw dataset root; use a fresh directory to keep supplied labels")
     p.add_argument("--force", action="store_true", help="Overwrite existing files")
     convert(p.parse_args())

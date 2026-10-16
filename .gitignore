@@ -71,3 +71,34 @@ CLAUDE.md
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Generated reproduction bundle and scratch outputs stay outside Git.
+deliverable/handoff/
+deliverable/weights/
+work/
+
+# Public GitHub repository: source and documentation only. Keep scans,
+# annotations, model artifacts, rendered media, and handoff archives local.
+data/
+Segmentation/
+presentations/
+docs/images/
+docs/media/
+docs/figures/
+_share/walk_algo_share/sample_data/
+**/results/
+*.zip
+*.gz
+*.gif
+*.jpg
+*.jpeg
+*.pdf
+*.pptx
+*.pth
+*.ckpt
+*.wav
+*.mov
+*.avi
+*.jsonl
+
+# Small metadata files live in the private handoff alongside the data.

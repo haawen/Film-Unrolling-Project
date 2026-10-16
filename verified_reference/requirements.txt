@@ -1,0 +1,47 @@
+# Virtual unrolling of motion-picture film -- Python dependencies
+#
+# Versions are those of the environment that produced every reported result
+# (PSI Merlin7 conda env "nnunet", Python 3.12.13, CUDA 12.4, A100-80GB).
+#
+# Setup (see README.md, section "Installation"):
+#   conda create -n nnunet python=3.12 -y
+#   conda activate nnunet
+#   pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements.txt
+#
+# Install PyTorch FIRST (from the CUDA index above); nnunetv2/monai/pyiqa would
+# otherwise pull a CPU-only or mismatched torch build.
+
+# --- segmentation -------------------------------------------------------------
+nnunetv2==2.6.4            # nnU-Net v2 (selected model: 3d_fullres, Dataset502)
+monai==1.5.2               # UNet3D / SwinUNETR comparison models
+batchgenerators==0.25.1
+batchgeneratorsv2==0.3.0
+connected-components-3d==3.26.1
+SimpleITK==2.5.3
+nibabel==5.4.0             # NIfTI I/O (nnU-Net inputs/outputs)
+tifffile==2026.3.3         # 2D nnU-Net datasets (.tif)
+einops==0.8.2
+timm==1.0.22
+
+# --- core numerics / I/O (emulsion walk, rendering, evaluation) ---------------
+numpy==2.3.5
+scipy==1.17.1
+h5py==3.16.0               # CT slices, segmentation chunks
+scikit-image==0.26.0
+scikit-learn==1.8.0
+matplotlib==3.10.8
+pillow==12.0.0
+pandas==3.0.1
+seaborn==0.13.2
+tqdm==4.67.3
+
+# --- video ----------------------------------------------------------------------
+imageio==2.37.2
+imageio-ffmpeg==0.6.0      # bundles an ffmpeg binary for mp4 read/write
+opencv-python-headless==4.13.0.92
+
+# --- learned / no-reference image-quality metrics (LPIPS, DISTS, NIQE, ...) -----
+# Optional: evaluation runs without it, skipping those metrics. Downloads model
+# weights on first use (needs internet once; cached in ~/.cache/torch/hub).
+pyiqa==0.1.15.post2

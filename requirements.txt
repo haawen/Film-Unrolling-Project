@@ -5,10 +5,13 @@
 # Setup:
 #   conda create -n nnunet python=3.12 -y
 #   conda activate nnunet
-#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+#   pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 #   pip install -r requirements.txt
 
-# ── Core (install these AFTER PyTorch) ──
+# Core requirements (install the CUDA PyTorch build above first)
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
 acvl_utils==0.2.5
 annotated-doc==0.0.4
 anyio==4.12.1
@@ -56,7 +59,7 @@ nibabel==5.4.0
 nnunetv2==2.6.4
 numexpr==2.14.1
 numpy==2.3.5
-packaging @ file:///C:/miniconda3/conda-bld/packaging_1761049137378/work
+packaging==25.0
 pandas==3.0.1
 pillow==12.0.0
 Pygments==2.19.2
@@ -87,3 +90,10 @@ unittest2==1.1.0
 urllib3==2.6.3
 wheel==0.46.3
 yacs==0.1.8
+
+# Direct dependencies used by the reconstruction, evaluation, and comparison modules.
+# Install a CUDA-compatible PyTorch build first, as described in README.md.
+imageio-ffmpeg>=0.6,<1
+monai==1.5.2
+opencv-python-headless>=4.10,<5
+pyiqa==0.1.16
