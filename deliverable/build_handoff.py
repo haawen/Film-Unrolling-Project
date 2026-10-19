@@ -243,17 +243,39 @@ def main() -> None:
         "videos/03_final_gt_free_alignment.mp4")
     COPIED[-1]["source"] = "verified_reference/Results/0_requested_videos/3b_final_model_NO_gt__border_locked.mp4"
 
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme = (ROOT / "REPRODUCTION.md").read_text(encoding="utf-8")
+    public_note = (
+        "**GitHub contains source code, documentation, and the overview's showcase\n"
+        "figures.** CT scans, annotations, trained weights, quantitative result files,\n"
+        "and deliverable videos are distributed separately where rights permit. Data\n"
+        "paths below describe that separate handoff and are absent from GitHub.\n\n"
+    )
+    if public_note not in readme:
+        raise ValueError("Reproduction guide's public data note changed")
     readme = readme.replace(
-        "The portable package is in [`deliverable/handoff/`](deliverable/handoff/README.md).",
-        "This directory is the portable handoff package. Its data files are included here."
+        public_note,
+        "**This handoff contains the training data, models, outputs, and videos "
+        "described below.** The separately supplied raw full-width CT archive "
+        "is required for CT-dependent reruns.\n\n",
+    )
+    public_location = (
+        "The portable data package is assembled locally in `deliverable/handoff/` and is\n"
+        "not committed to GitHub. Run the commands below from a checkout populated with\n"
+        "the separately supplied handoff data, or from the handoff package root."
+    )
+    if public_location not in readme:
+        raise ValueError("Reproduction guide's public location note changed")
+    readme = readme.replace(
+        public_location,
+        "This directory is the portable handoff package. Run the commands below "
+        "from this directory.",
     )
     readme = readme.replace("deliverable/handoff/videos/", "videos/")
     readme = readme.replace("deliverable/handoff/MANIFEST.json", "MANIFEST.json")
     readme = readme.replace("[`deliverable/handoff/videos/`](videos/)", "[`videos/`](videos/)")
     (OUT / "README.md").write_text(readme, encoding="utf-8")
     COPIED.append({"path": "README.md", "bytes": (OUT / "README.md").stat().st_size,
-                   "source": "README.md (path-adjusted copy)"})
+                   "source": "REPRODUCTION.md (path-adjusted copy)"})
 
     # Hash the requested videos and LPIPS weights for an auditable transfer.
     for item in COPIED:

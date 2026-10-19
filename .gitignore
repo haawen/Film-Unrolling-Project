@@ -101,4 +101,13 @@ _share/walk_algo_share/sample_data/
 *.avi
 *.jsonl
 
+# User-approved figures embedded in the GitHub overview README.
+!docs/images/
+!docs/media/
+!docs/images/fair_comparison.png
+!docs/images/nnunet3d_gt_vs_pred.png
+!docs/media/ct_windings_overlay.jpg
+!docs/media/final_result_gt_vs_ours.gif
+!docs/media/unroll_compare_4way.gif
+
 # Small metadata files live in the private handoff alongside the data.
