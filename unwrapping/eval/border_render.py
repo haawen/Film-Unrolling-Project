@@ -191,6 +191,12 @@ def main():
                          "which is why a perforation shows at one edge.")
     ap.add_argument("--along-scale", type=float, default=1.0,
                     help="Scale the along-film window about its centre.")
+    ap.add_argument("--phase-strip", default=None,
+                    help="Take the phase lock's pitch + phase from THIS strip "
+                         "instead of the rendered one. For intensity-only post-"
+                         "processing (e.g. band_correct): the brightness change "
+                         "alone moved the auto pitch 1130.13 -> 1138.93 (229 -> 226 "
+                         "cells), so frame it like its unprocessed source.")
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--reverse", action="store_true")
     ap.add_argument("--invert", action="store_true")
@@ -228,7 +234,10 @@ def main():
         # part that was missing.
         from unwrapping.inr.make_film_video import (periodic_component,
                                                     refine_pitch_phase)
-        col = np.asarray(s).mean(axis=0)
+        src = np.load(args.phase_strip, mmap_mode="r") if args.phase_strip else s
+        if src.shape != s.shape:
+            raise SystemExit(f"--phase-strip shape {src.shape} != strip {s.shape}")
+        col = np.asarray(src).mean(axis=0)
         pc = int(round(pitch))
         pf = refine_pitch_phase(col, pc)
         per = periodic_component(col, pc)
