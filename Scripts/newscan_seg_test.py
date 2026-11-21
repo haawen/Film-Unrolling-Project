@@ -39,7 +39,7 @@ def cmd_chunks(args):
     zs = list(range(args.z0, args.z1 + 1))
     sl = []
     for z in zs:
-        p = os.path.join(args.in_dir, f"Mickey_merged_{z:04d}.h5")
+        p = os.path.join(args.in_dir, f"{args.prefix}_{z:04d}.h5")
         if not os.path.exists(p):
             raise SystemExit(f"missing {p}")
         with h5py.File(p, "r") as f:
@@ -136,7 +136,7 @@ def cmd_check(args):
                                                         img.shape[1] / 2)
         fig, ax = plt.subplots(1, 2, figsize=(15, 7.5))
         ax[0].imshow(ov); ax[0].set_title(f"{args.tag} z-index {k}: full slice")
-        y0 = int(cy) - 60; x0 = int(cx) + 700
+        y0 = int(cy) - 60; x0 = int(cx) + args.zoom_r
         ax[1].imshow(ov[max(0, y0):y0 + 320, x0:x0 + 320], interpolation="nearest")
         ax[1].set_title("zoom (blue=base, red=emulsion) -- bands must be "
                         "continuous + emulsion a thin line")
@@ -157,11 +157,15 @@ def main():
     c.add_argument("--z0", type=int, required=True)
     c.add_argument("--z1", type=int, required=True)
     c.add_argument("--scale", type=float, default=1.0)
+    c.add_argument("--prefix", default="Mickey_merged",
+                   help="slice file prefix (<prefix>_<z:04d>.h5); high-res scan: Mickey_HR")
     k = sub.add_parser("check")
     k.add_argument("--pred", required=True)
     k.add_argument("--vol", required=True)
     k.add_argument("--out-dir", required=True)
     k.add_argument("--tag", default="native")
+    k.add_argument("--zoom-r", type=int, default=700,
+                   help="zoom crop starts this far right of the film centroid (high-res: ~1600)")
     args = ap.parse_args()
     (cmd_chunks if args.mode == "chunks" else cmd_check)(args)
 

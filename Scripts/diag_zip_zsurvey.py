@@ -50,7 +50,10 @@ def otsu(a, nbins=512):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--zip", required=True)
+    ap.add_argument("--zip", default=None)
+    ap.add_argument("--dir", default=None,
+                    help="Instead of --zip: a directory of *_<z>.h5 (key image) or "
+                         "*_<z>.tif slices (high-res scan, 2026-11).")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--step", type=int, default=8)
     ap.add_argument("--z0", type=int, default=None)
@@ -66,10 +69,15 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
-    zf = zipfile.ZipFile(args.zip)
-    pat = re.compile(r"_(\d+)\.tif$", re.I)
-    zmap = {int(pat.search(n).group(1)): n
-            for n in zf.namelist() if pat.search(n)}
+    if args.dir:
+        pat = re.compile(r"_(\d+)\.(h5|tif)$", re.I)
+        zmap = {int(pat.search(n).group(1)): os.path.join(args.dir, n)
+                for n in os.listdir(args.dir) if pat.search(n)}
+    else:
+        zf = zipfile.ZipFile(args.zip)
+        pat = re.compile(r"_(\d+)\.tif$", re.I)
+        zmap = {int(pat.search(n).group(1)): n
+                for n in zf.namelist() if pat.search(n)}
     zs = sorted(zmap)
     z0 = args.z0 if args.z0 is not None else zs[0]
     z1 = args.z1 if args.z1 is not None else zs[-1]
@@ -78,6 +86,12 @@ def main():
           f"(step {args.step})", flush=True)
 
     def read(k):
+        if args.dir:
+            if zmap[k].endswith(".h5"):
+                import h5py
+                with h5py.File(zmap[k], "r") as f:
+                    return f["image"][:: args.sub, :: args.sub]
+            return tf.imread(zmap[k])[:: args.sub, :: args.sub]
         return tf.imread(io.BytesIO(zf.read(zmap[k])))[:: args.sub, :: args.sub]
 
     # PER-SLICE Otsu by default. A single global cut does NOT work here: overall
