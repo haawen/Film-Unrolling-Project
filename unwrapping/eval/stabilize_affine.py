@@ -203,17 +203,36 @@ def main():
                          "of assuming linspace. Needed whenever our frame count "
                          "differs from GT's (a raw render: 229 vs 233) -- see "
                          "pair_frames(). 0 = old behaviour.")
+    ap.add_argument("--png-dir", default=None,
+                    help="LOSSLESS mode: read <png-dir>/ours_locked/*.png and "
+                         "<png-dir>/gt/*.png (frame_match --png-dir; already paired "
+                         "1:1, no trim/crop; --in/--gt ignored) and write "
+                         "<png-dir>/ours_affine/frame_NNNN.png (16-bit, same size, "
+                         "uncropped), pairs_affine/ (GT | ours affine | overlay) and "
+                         "affine_params.csv. The mp4 at --out is still written.")
     args = ap.parse_args()
 
-    frames = load_luma(args.inp)
-    n = len(frames); H, W = frames[0].shape
-    gt = load_video_luma(args.gt)
-    if not args.no_gt_trim:
-        gt, _ = trim_leader(gt)
-    if args.gt_crop.lower() not in ("none", ""):
-        gt = apply_crop(gt, parse_crop(args.gt_crop))
-    gt = [_resize(g, H, W) for g in gt]
-    idx = np.linspace(0, len(gt) - 1, n).round().astype(int)
+    if args.png_dir:
+        import glob, os
+        def _rd(sub):
+            ps = sorted(glob.glob(os.path.join(args.png_dir, sub, "frame_*.png")))
+            return ps, [np.asarray(Image.open(p), np.float32) / 65535.0 for p in ps]
+        names, frames = _rd("ours_locked")
+        gnames, gt = _rd("gt")
+        assert [os.path.basename(p) for p in names] == \
+            [os.path.basename(p) for p in gnames], "ours_locked/ and gt/ differ"
+        n = len(frames); H, W = frames[0].shape
+        idx = np.arange(n)
+    else:
+        frames = load_luma(args.inp)
+        n = len(frames); H, W = frames[0].shape
+        gt = load_video_luma(args.gt)
+        if not args.no_gt_trim:
+            gt, _ = trim_leader(gt)
+        if args.gt_crop.lower() not in ("none", ""):
+            gt = apply_crop(gt, parse_crop(args.gt_crop))
+        gt = [_resize(g, H, W) for g in gt]
+        idx = np.linspace(0, len(gt) - 1, n).round().astype(int)
     if args.gt_search:
         idx = pair_frames(frames, gt, idx, args.gt_search,
                           out_png=args.out + ".pairing.png")
@@ -261,20 +280,50 @@ def main():
     print(f"  frame-to-frame deformation std (scale-x,scale-y,rot):", flush=True)
     print(f"    before {b.round(4)}  ->  after {a.round(4)}", flush=True)
 
+    if args.png_dir:
+        import os
+        for sub in ("ours_affine", "pairs_affine"):
+            os.makedirs(os.path.join(args.png_dir, sub), exist_ok=True)
+        # the accumulated field is affine (sum of affine fits): recover its 6
+        # coefficients exactly by least squares on a coarse grid
+        yy, xx = np.mgrid[0:H:16, 0:W:16]
+        A = np.column_stack([np.ones(yy.size), (xx - W / 2).ravel(), (yy - H / 2).ravel()])
+        rows = ["frame,gt_frame,dx0,dx_dx,dx_dy,dy0,dy_dx,dy_dy,sample_sign"]
+        for j in range(n):
+            fn = f"frame_{j + 1:04d}.png"
+            Image.fromarray((np.clip(warped[j], 0, 1) * 65535).round().astype(np.uint16)
+                            ).save(os.path.join(args.png_dir, "ours_affine", fn))
+            g, o = np.clip(gt[idx[j]], 0, 1), np.clip(warped[j], 0, 1)
+            ov = np.stack([o, g, o], -1)          # GT green, ours magenta
+            sep = np.ones((H, 6, 3), np.float32)
+            row = np.concatenate([np.repeat(g[..., None], 3, -1), sep,
+                                  np.repeat(o[..., None], 3, -1), sep, ov], 1)
+            Image.fromarray((row * 255).astype(np.uint8)).save(
+                os.path.join(args.png_dir, "pairs_affine", fn))
+            cx = np.linalg.lstsq(A, tot[j][1][::16, ::16].ravel(), rcond=None)[0]
+            cy = np.linalg.lstsq(A, tot[j][0][::16, ::16].ravel(), rcond=None)[0]
+            rows.append(f"{j + 1},{int(idx[j]) + 1}," + ",".join(f"{v:.6f}" for v in cx)
+                        + "," + ",".join(f"{v:.6f}" for v in cy) + f",{sign:+.0f}")
+        with open(os.path.join(args.png_dir, "affine_params.csv"), "w") as fh:
+            fh.write("\n".join(rows) + "\n")
+        print(f"  wrote {n} lossless aligned frames -> {args.png_dir}/ours_affine, "
+              f"pairs_affine/, affine_params.csv", flush=True)
+
     # crop to a safe common region (deformation warps pull in edges)
     ec = args.extra_crop
     y0, y1 = int(H * ec), int(H * (1 - ec))
     x0, x1 = int(W * ec), int(W * (1 - ec))
     cropped = [w[y0:y1, x0:x1] for w in warped]
     ch, cw = cropped[0].shape
-    Wf = int(round(H * cw / ch)); Wf += Wf % 2
+    Hf = H - H % 2                                  # libx264 needs even dims
+    Wf = int(round(Hf * cw / ch)); Wf += Wf % 2
     wr = imageio.get_writer(args.out, fps=args.fps, codec="libx264",
                             quality=9, macro_block_size=1)
     for c in cropped:
         wr.append_data(np.asarray(Image.fromarray(
-            (np.clip(c, 0, 1) * 255).astype(np.uint8)).resize((Wf, H))))
+            (np.clip(c, 0, 1) * 255).astype(np.uint8)).resize((Wf, Hf))))
     wr.close()
-    print(f"Done -> {args.out}  ({H}x{Wf}); GT-STABILIZED VIEWING COPY "
+    print(f"Done -> {args.out}  ({Hf}x{Wf}); GT-STABILIZED VIEWING COPY "
           f"({args.mode}) -- label as such.", flush=True)
 
 

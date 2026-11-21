@@ -392,8 +392,69 @@ def _resample_xy(X, Y, K2):
     return Xo, Yo
 
 
+def enforce_radial_order(kept, cx_a, cy_a, margin, min_run=20, max_gap=3):
+    """Repair TRACK LABEL SWAPS: windings cannot cross, so at every anchor the kept
+    windings (sorted inner->outer by track radius) must be radially ordered.
+
+    The tracker / spacing-dedup can hand two adjacent windings each other's walks
+    over a long z block (measured on the new scan: kept w5<->w6 over z470-~750,
+    +21/-23 px = one spacing on 100% of bins, every walk on a real band). z-heal
+    cannot see it -- a block of ~280 anchors drags the running z-median with it --
+    but the strip shows content one turn away in those rows (the end-of-film tear).
+
+    Per adjacent pair, flag the anchors where the outer winding's r(phi) sits more
+    than `margin` px INSIDE the inner one (median over the shared azimuths), and
+    swap the two rows -- resampling each onto the other's phi grid (all grids span
+    the same [eps, 2pi-eps], they differ only in column count) -- ONLY inside runs
+    of >= `min_run` flagged anchors (gaps <= `max_gap` bridged). A label swap is a
+    long coherent block (w5<->w6: ~270 anchors); short flips are messy walks, and
+    swapping those whole rows made things worse: an unrestricted per-anchor version
+    added 20 new >8px kinks in the perforation transition z470-500 (w15 17.5 px
+    over z470-479, w24 39 px at z478) for 138 scattered swaps. The innermost and
+    outermost windings never take part (same guard as z-heal): they are the film
+    ENDS -- partial, non-circular turns whose median r(phi) is not a band radius.
+    Without the guard the first fit check swapped w0<->w1 at z470-472 and moved w0
+    173 px off its z-neighbours -- and z470 is the clamp anchor for the whole low
+    perforation band below it. Returns the repaired list plus per-pair swap counts
+    and the anchors touched."""
+    nk = len(kept)
+    if nk < 2:
+        return kept, np.zeros(0, int), []
+    n = kept[0][1].shape[0]
+    cxA = np.asarray(cx_a, float); cyA = np.asarray(cy_a, float)
+    Xs = [t[1] for t in kept]; Ys = [t[2] for t in kept]
+    Ps = [np.asarray(t[3], float) for t in kept]
+    swaps = np.zeros(nk - 1, int); hit = set(); short = 0
+    for k in range(1, nk - 2):                         # film ends excluded
+        flag = np.zeros(n, bool)                       # on CURRENT data: an earlier
+        for a in range(n):                             # pair's repair is seen here
+            rk = np.hypot(Xs[k][a] - cxA[a], Ys[k][a] - cyA[a])
+            rj = np.hypot(Xs[k + 1][a] - cxA[a], Ys[k + 1][a] - cyA[a])
+            flag[a] = np.median(rj - np.interp(Ps[k + 1], Ps[k], rk)) < -margin
+        idx = np.nonzero(flag)[0]
+        if idx.size == 0:
+            continue
+        runs, s = [], 0                                # bridge gaps <= max_gap
+        for i in range(1, len(idx) + 1):
+            if i == len(idx) or idx[i] - idx[i - 1] > max_gap + 1:
+                runs.append(idx[s:i]); s = i
+        for run in runs:
+            if run[-1] - run[0] + 1 < min_run:
+                short += len(run); continue
+            for a in run:                              # flagged anchors only
+                xk, yk = Xs[k][a].copy(), Ys[k][a].copy()
+                Xs[k][a] = np.interp(Ps[k], Ps[k + 1], Xs[k + 1][a])
+                Ys[k][a] = np.interp(Ps[k], Ps[k + 1], Ys[k + 1][a])
+                Xs[k + 1][a] = np.interp(Ps[k + 1], Ps[k], xk)
+                Ys[k + 1][a] = np.interp(Ps[k + 1], Ps[k], yk)
+                swaps[k] += 1; hit.add(int(a))
+    print(f"  radial-order: left {short} flagged anchors in runs < {min_run} untouched")
+    return ([(r, X, Y, p) for (r, _, _, p), X, Y in zip(kept, Xs, Ys)], swaps,
+            sorted(hit))
+
+
 def z_heal_windings(kept, cx_a, cy_a, seam, eps_phi, thresh, window=61,
-                    max_range=150.0):
+                    max_range=150.0, heal_ends="none", ends_min_complete=0.8):
     """Repair mid-turn winding JUMPS by cross-z consensus (needs dense anchors).
 
     A walk that jumps onto a neighbour partway leaves the rest of its own turn on
@@ -427,13 +488,42 @@ def z_heal_windings(kept, cx_a, cy_a, seam, eps_phi, thresh, window=61,
         # across the void (the tail is walked at only a minority of anchors, so
         # the median-range gate below can miss it while the clamp-extension
         # quorum still fires on garbage). Both are cut from the video anyway.
-        if wi == 0 or wi == len(kept) - 1:
-            out.append((r0, X, Y, phi))
-            continue
+        #
+        # --heal-ends narrows that to the case it was written for. On the new
+        # full-width scan the real termination track is already dropped by
+        # --min-coverage, so kept[-1] is an ordinary near-complete winding
+        # (r~1696, walked at 1415/1480 anchors) -- and leaving it unhealed left
+        # 4.7% jumped + 6.9% clamped bins, whole-turn rows of them, which render
+        # as the thin vertical lines at the START of the video
+        # (Scripts/diag_end_windings.py: 90 of its 95 line rows sit on bad
+        # rows; P(line|bad bin) 0.41 vs 0.016). With the flag an end winding is
+        # healed exactly like an interior one IF it is a complete winding: at
+        # least `ends_min_complete` of the anchors walk >= 90% of the turn on
+        # the column's own ray. A genuinely partial film end fails that test
+        # and keeps the old never-heal behaviour.
+        # (2026-11-16, user fit check: the outer heal is good; the inner tongue
+        # is not -- it is skipped by the max_range gate anyway, but `outer`
+        # keeps it out by construction.)
+        is_end = wi == 0 or wi == len(kept) - 1
+        side = "inner" if wi == 0 else "outer"
+        allowed = heal_ends in ("both", side)
+        th = (seam + np.asarray(phi, float))[None, :]
+        if is_end:
+            complete = 0.0
+            if allowed:
+                ta = np.arctan2(Y - cyA, X - cxA)
+                onray = np.abs((ta - th + np.pi) % TWO_PI - np.pi) <= math.radians(3.0)
+                complete = float((onray.mean(axis=1) >= 0.9).mean())
+                print(f"    heal-ends: kept w{wi} (r {r0:.0f}) complete at "
+                      f"{100 * complete:.1f}% of anchors -> "
+                      f"{'HEAL' if complete >= ends_min_complete else 'skip (partial end)'}",
+                      flush=True)
+            if complete < ends_min_complete or not allowed:
+                out.append((r0, X, Y, phi))
+                continue
         K = X.shape[1]
         # the column's ray angle — read from the winding's OWN phi grid, which
         # v13 no longer assumes is uniform (see arc_equalize).
-        th = (seam + np.asarray(phi, float))[None, :]
         R = np.hypot(X - cxA, Y - cyA)
         # heal assumes a ~circular band (r(phi) smooth, azimuth ~= column ray,
         # z-drift ~px). Skip windings whose per-anchor radius RANGE says "not a
@@ -675,6 +765,38 @@ def main():
                          "(px) from the running z-median and re-interpolate them "
                          "from the winding's clean anchors. Jumps are ~a spacing "
                          "(>=17px), real z-drift <1px/anchor. 0 = off. Cache-fast.")
+    ap.add_argument("--ct-remap", default=None,
+                    help="npz from Scripts/register_restitch.py: render --ct-dir (a "
+                         "re-reconstruction of the same scan) with THIS geometry, rows "
+                         "kept in the original z frame. See the render loop.")
+    ap.add_argument("--remap-z", default="40,2400",
+                    help="--ct-remap: original-frame z range of the strip rows "
+                         "(the original new-scan render is z40-2400)")
+    ap.add_argument("--dump-rows", default=None,
+                    help="VERIFICATION: comma list of strip-row z (original frame). "
+                         "Render ONLY those rows, save dump_rows.npz (source CT file "
+                         "per row, t, the exact sample positions and the raw row "
+                         "values, pre-seam-bridge) and exit without writing a strip.")
+    ap.add_argument("--heal-ends", default="none",
+                    choices=["none", "outer", "inner", "both"],
+                    help="Let z-heal repair the outermost (and/or innermost) kept winding too, "
+                         "IF it is a complete winding (>= --heal-ends-min-complete of "
+                         "anchors walk >=90%% of the turn on-ray). Default off = the "
+                         "historic never-heal-the-ends behaviour. Fixes the thin "
+                         "vertical lines at the start of the new-scan video.")
+    ap.add_argument("--heal-ends-min-complete", type=float, default=0.8)
+    ap.add_argument("--dump-geometry", default=None,
+                    help="DIAGNOSTIC: save the 2 innermost + 2 outermost kept "
+                         "windings' (X,Y,phi) BEFORE z-heal and AFTER the final "
+                         "arc-equalize, plus per-winding column counts, to this npz, "
+                         "and exit without rendering.")
+    ap.add_argument("--enforce-radial-order", action="store_true",
+                    help="Before z-heal, repair TRACK LABEL SWAPS: at each anchor, "
+                         "swap adjacent kept windings whose r(phi) order is inverted "
+                         "by more than --min-sep px. Windings cannot cross. Found "
+                         "on the new scan: kept w5<->w6 swapped over z470-~750 = the "
+                         "end-of-film left-band tear. Off by default so existing "
+                         "renders reproduce. Cache-fast.")
     ap.add_argument("--z-smooth-anchors", type=float, default=0.0,
                     help="z-AWARENESS (v7): Gaussian-smooth each winding's (x,y) path "
                          "across the z-anchors (sigma in anchor-index units). The "
@@ -1113,10 +1235,42 @@ def main():
         kept = filled
         print(f"  gap-infill inserted {n_ins} never-walked windings (touching pairs)")
 
+    # ── radial-order repair: undo track label swaps BEFORE z-heal sees them ──
+    if args.enforce_radial_order and len(kept) >= 2:
+        kept, swaps, hit = enforce_radial_order(kept, cx_a, cy_a, args.min_sep)
+        print(f"  radial-order: {int(swaps.sum())} adjacent-pair swaps at "
+              f"{len(hit)}/{n} anchors (margin {args.min_sep}px)")
+        for k in np.nonzero(swaps)[0]:
+            print(f"    kept w{k}<->w{k + 1}: {swaps[k]} swaps")
+        if hit:
+            zh = np.asarray(z_anchor, float)[hit]
+            runs, s = [], 0
+            for i in range(1, len(hit) + 1):
+                if i == len(hit) or hit[i] != hit[i - 1] + 1:
+                    runs.append((zh[s], zh[i - 1], i - s)); s = i
+            print("    z runs: " + ", ".join(f"z{a:.0f}-{b:.0f} ({c})"
+                                         for a, b, c in runs[:40])
+                  + (" ..." if len(runs) > 40 else ""))
+
+    dump_idx = []
+    if args.dump_geometry:
+        nk = len(kept)
+        dump_idx = sorted({0, 1, nk - 2, nk - 1} & set(range(nk)))
+        dump_geo = {"idx": np.array(dump_idx), "r": np.array([t[0] for t in kept]),
+                    "z_anchor": np.asarray(z_anchor, float),
+                    "cx_a": np.asarray(cx_a, float), "cy_a": np.asarray(cy_a, float),
+                    "seam": float(seam), "eps_phi": float(eps_phi)}
+        for i in dump_idx:
+            _, X, Y, p = kept[i]
+            dump_geo[f"pre_X{i}"] = X.copy(); dump_geo[f"pre_Y{i}"] = Y.copy()
+            dump_geo[f"pre_phi{i}"] = np.asarray(p, float)
+
     # ── z-heal (v9): repair mid-turn winding jumps by cross-z radius consensus ──
     if args.z_heal_px > 0 and n >= 7:
-        kept, nbins = z_heal_windings(kept, cx_a, cy_a, seam, eps_phi,
-                                      args.z_heal_px)
+        kept, nbins = z_heal_windings(
+            kept, cx_a, cy_a, seam, eps_phi, args.z_heal_px,
+            heal_ends=args.heal_ends,
+            ends_min_complete=args.heal_ends_min_complete)
         print(f"  z-heal: repaired {nbins} jumped (anchor,phi) bins "
               f"(>{args.z_heal_px}px from running z-median)")
 
@@ -1155,6 +1309,16 @@ def main():
               f"{100 * (max(stretch) - 1) / 2:+.1f}% (peak-to-mean).")
     total_cols = sum(t[1].shape[1] for t in kept)
     print(f"  whole roll: {len(kept)} windings, {total_cols} cols")
+    if args.dump_geometry:
+        for i in dump_idx:
+            _, X, Y, p = kept[i]
+            dump_geo[f"fin_X{i}"] = X; dump_geo[f"fin_Y{i}"] = Y
+            dump_geo[f"fin_phi{i}"] = np.asarray(p, float)
+        dump_geo["K_final"] = np.array([t[1].shape[1] for t in kept])
+        np.savez(args.dump_geometry, **dump_geo)
+        print(f"  DUMP-GEOMETRY: windings {dump_idx} -> {args.dump_geometry}; "
+              f"no render", flush=True)
+        return
 
     # ── inspect: draw the DELIVERABLE windings (kept + infilled) on each anchor CT ──
     if args.inspect_anchors:
@@ -1197,6 +1361,40 @@ def main():
               f"[{z_anchor[0]:.0f}, {z_anchor[-1]:.0f}]: {args.z_extrap}, "
               f"fitted over the nearest {args.z_extrap_span:.0f} slices", flush=True)
     z_list = sorted(z_to_path)[:: args.z_step]
+    # ── --ct-remap: render a DIFFERENT reconstruction of the same scan (the
+    #    restitched tomogram) with this geometry. Rows stay in the ORIGINAL z
+    #    (--remap-z range), so the strip is row-for-row comparable with the original
+    #    render and every downstream z-crop / border / GT pairing applies unchanged.
+    #    Row z reads the restitched slice nearest z_new(z) and shifts the path by
+    #    t(z) (register_restitch.py: new = old + t, z_old = z_new + off). ──
+    remap = None
+    if args.ct_remap:
+        Rm = np.load(args.ct_remap)
+        zog = np.asarray(Rm["z_new"], float) + np.asarray(Rm["off"], float)
+        o = np.argsort(zog); zog = zog[o]
+        zng = np.asarray(Rm["z_new"], float)[o]
+        okt = np.isfinite(Rm["tx"][o]) & np.isfinite(Rm["ty"][o])
+        txg, tyg = np.asarray(Rm["tx"], float)[o], np.asarray(Rm["ty"], float)[o]
+        zlo, zhi = (int(v) for v in args.remap_z.split(","))
+        z_list = list(range(zlo, zhi + 1, args.z_step))
+        avail = np.array(sorted(z_to_path))
+
+        def remap(z):
+            zn = float(np.interp(z, zog, zng))
+            zi = int(avail[np.argmin(np.abs(avail - round(zn)))])
+            return zi, float(np.interp(z, zog[okt], txg[okt])), \
+                float(np.interp(z, zog[okt], tyg[okt]))
+        a, b = remap(z_list[0]), remap(z_list[-1])
+        print(f"  ct-remap: rows z{z_list[0]}-{z_list[-1]} (original frame) <- "
+              f"restitched z{a[0]}-{b[0]}; t from ({a[1]:+.2f},{a[2]:+.2f}) to "
+              f"({b[1]:+.2f},{b[2]:+.2f}) px", flush=True)
+    full_rows = list(z_list)
+    if args.dump_rows:
+        want = [int(v) for v in args.dump_rows.split(",")]
+        z_list = [z for z in want if z in set(full_rows)]
+        dump = {"z": [], "row_index": [], "src": [], "tx": [], "ty": [],
+                "xs": [], "ys": []}
+        print(f"  DUMP-ROWS: rendering only z {z_list}", flush=True)
     strip = np.empty((len(z_list), total_cols), dtype=np.float32)
     # TRANSVERSE AVERAGING across the emulsion's own thickness. The render
     # otherwise reads a single infinitesimally-thin line through the middle of a
@@ -1214,10 +1412,21 @@ def main():
         print(f"  transverse averaging: {tw} taps at offsets "
               f"{np.round(offs, 2).tolist()} px along the path normal")
     for j, z in enumerate(z_list):
-        img = norm_slice(load_ct(z_to_path[z]))
+        if remap is not None:
+            zi, tx, ty = remap(z)
+        else:
+            zi, tx, ty = z, 0.0, 0.0
+        img = norm_slice(load_ct(z_to_path[zi]))
+        if args.dump_rows:
+            dump["z"].append(z); dump["row_index"].append(full_rows.index(z))
+            dump["src"].append(str(z_to_path[zi])); dump["tx"].append(tx)
+            dump["ty"].append(ty)
+            dump["xs"].append(np.concatenate([fX(z) + tx for fX, _, _ in win]))
+            dump["ys"].append(np.concatenate([fY(z) + ty for _, fY, _ in win]))
+            print(f"  DUMP z{z} <- {z_to_path[zi]}  t=({tx:+.3f},{ty:+.3f})", flush=True)
         c = 0
         for fX, fY, K in win:
-            xs = fX(z); ys = fY(z)
+            xs = fX(z) + tx; ys = fY(z) + ty
             if tw == 1:
                 strip[j, c:c + K] = bilinear_sample(img, xs, ys)
             else:
@@ -1231,6 +1440,16 @@ def main():
             c += K
         if j % 200 == 0 or j == len(z_list) - 1:
             print(f"  [{j + 1}/{len(z_list)}] z{z}", flush=True)
+    if args.dump_rows:
+        np.savez(os.path.join(args.out_dir, "dump_rows.npz"),
+                 z=np.array(dump["z"]), row_index=np.array(dump["row_index"]),
+                 src=np.array(dump["src"]), tx=np.array(dump["tx"]),
+                 ty=np.array(dump["ty"]), xs=np.stack(dump["xs"]),
+                 ys=np.stack(dump["ys"]), rows=strip,
+                 K=np.array([K for _, _, K in win]), transverse_px=tw)
+        print(f"  DUMP-ROWS: wrote {os.path.join(args.out_dir, 'dump_rows.npz')}; "
+              f"no strip written", flush=True)
+        return
 
     # ── seam bridge: fill the residual 2*eps gap at each winding boundary with a
     #    linear blend of the two (continuous-film) sides -> ~0 visible join ──

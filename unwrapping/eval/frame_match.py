@@ -117,7 +117,8 @@ class StripWindows:
             f = f[:, ::-1]
         return np.ascontiguousarray(f)
 
-    def window_full(self, x, height, width=None, fy=None, fx=None, zshift=0.0):
+    def window_full(self, x, height, width=None, fy=None, fx=None, zshift=0.0,
+                    hq=False):
         """Full-res GT-oriented frame centered at x with the calibrated (or
         given) extents, resized to height (x width if given). zshift moves the
         z-crop window (strip px) — used by the stabilized video export."""
@@ -144,6 +145,10 @@ class StripWindows:
             f = f[:, ::-1]
         if width is None:
             width = max(2, int(round(height * f.shape[1] / f.shape[0])))
+        if hq:      # float resample, no 8-bit quantisation (lossless PNG export)
+            return np.asarray(Image.fromarray(np.ascontiguousarray(f, np.float32),
+                                              mode="F").resize((width, height),
+                                                               Image.BILINEAR))
         im = Image.fromarray((f * 255).astype(np.uint8)).resize((width, height))
         return np.asarray(im).astype(np.float32) / 255
 
@@ -699,6 +704,14 @@ def main():
                          "each LOCKED to its GT frame by the measured "
                          "registration shift (no smoothing -> no sawtooth).")
     ap.add_argument("--fps", type=int, default=12)
+    ap.add_argument("--png-dir", default=None,
+                    help="Also write the GT-locked frames LOSSLESSLY, 1:1 with the "
+                         "leader-trimmed GT (= film_stabilized_gtsync order): "
+                         "<png-dir>/gt/frame_NNNN.png and <png-dir>/ours_locked/"
+                         "frame_NNNN.png, 16-bit, same size, pixel-aligned grids.")
+    ap.add_argument("--png-height", type=int, default=0,
+                    help="PNG frame height (0 = the GT crop's native height, so GT "
+                         "is not resampled).")
     args = ap.parse_args()
     zcrop = args.z_crop if args.z_crop else (0.05, 0.95)
     os.makedirs(args.out_dir, exist_ok=True)
@@ -924,6 +937,27 @@ def main():
         export_stabilized_video(
             sw, gt_m, gt_g, xc, czs, ks, dys, dxs, lock_good,
             os.path.join(args.out_dir, "film_stabilized.mp4"))
+
+    if args.png_dir:
+        Hq = args.png_height or int(gt.shape[1])
+        Wq = int(round(Hq * gt.shape[2] / gt.shape[1]))
+        for sub in ("gt", "ours_locked"):
+            os.makedirs(os.path.join(args.png_dir, sub), exist_ok=True)
+        print(f"Writing {n_gt} lossless frame pairs {Hq}x{Wq} -> {args.png_dir}",
+              flush=True)
+        for j in range(n_gt):
+            f = sw.window_full(xc[j], Hq, Wq, zshift=czs[j], hq=True)
+            g = np.asarray(Image.fromarray(np.asarray(gt[j], np.float32), mode="F")
+                           .resize((Wq, Hq), Image.BILINEAR))     # float, no 8-bit step
+            for sub, im in (("ours_locked", f), ("gt", g)):
+                Image.fromarray((np.clip(im, 0, 1) * 65535).round().astype(np.uint16)
+                                ).save(os.path.join(args.png_dir, sub,
+                                                    f"frame_{j + 1:04d}.png"))
+        json.dump([{"frame": j + 1, "gt_index_after_leader_trim": j,
+                    "strip_x_locked": float(xc[j]), "z_shift": float(czs[j])}
+                   for j in range(n_gt)],
+                  open(os.path.join(args.png_dir, "ours_locked_positions.json"), "w"),
+                  indent=1)
 
     # monotonicity (b<0: x must be non-increasing along GT time)
     viol = int((np.diff(xs) > 0.5 * abs(b)).sum()) if b < 0 else \
